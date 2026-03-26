@@ -2,6 +2,10 @@
 
 OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입니다.
 
+추천 GitHub 설명 문구:
+
+`OpenClaw smart-router plugin and local config samples for complexity-based local/remote LLM routing.`
+
 현재 포함된 핵심 구성은 `smart-router` 플러그인입니다. 이 플러그인은 요청 복잡도에 따라 로컬 LLM과 외부 LLM을 자동으로 선택합니다.
 
 ## 포함 내용
@@ -41,6 +45,58 @@ OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입
 4. `llm` 분류 모드를 사용할 경우 `OPENAI_API_KEY`를 게이트웨이 실행 프로세스 환경에 넣습니다.
 
 예시 설정은 [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5) 에 있습니다.
+
+## 설치
+
+smart-router 플러그인 디렉터리에서 의존성을 설치합니다.
+
+```bash
+cd extensions/smart-router
+pnpm install
+```
+
+OpenClaw 설정 예시:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "smart-router/auto"
+      },
+      "models": {
+        "smart-router/auto": {},
+        "smart-router/local": {},
+        "smart-router/nano": {},
+        "smart-router/mini": {},
+        "smart-router/full": {}
+      }
+    }
+  },
+  "plugins": {
+    "load": {
+      "paths": [
+        "/Volumes/ExtData/MyOpenClawRepo/extensions/smart-router"
+      ]
+    }
+  }
+}
+```
+
+## 테스트
+
+smart-router 변경 후 최소 검증 명령:
+
+```bash
+cd extensions/smart-router
+pnpm exec vitest run complexity.test.ts index.test.ts
+```
+
+권장 확인 항목:
+
+- `smart-router/auto`에서 `mini`, `full` 자동 라우팅
+- `smart-router/local`, `smart-router/nano`, `smart-router/mini`, `smart-router/full` 직접 선택
+- `evaluationMode: llm` 사용 시 `OPENAI_API_KEY`가 게이트웨이 프로세스 환경에서 보이는지 확인
 
 ## 문서
 
