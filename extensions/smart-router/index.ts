@@ -1,0 +1,624 @@
+/**
+ * Smart Router – OpenClaw 플러그인 엔트리
+ *
+ * 요청 복잡도를 자동 평가하여 로컬 LLM / 외부 LLM 라우팅을 결정한다.
+ *
+ * 동작 방식:
+ *   1. "smart-router" 프로바이더를 등록하고 "auto" 모델을 제공한다.
+ *   2. resolveDynamicModel 훅에서 로컬 Ollama 모델 정의를 반환한다.
+ *   3. wrapStreamFn 훅에서 메시지 복잡도를 분석하여:
+ *      - 단순/보통 → 로컬 Ollama로 그대로 전달
+ *      - 복잡/고급 → 모델 파라미터를 외부 LLM으로 변경하여 전달
+ *   4. /route, /local, /remote 슬래시 명령을 등록한다.
+ */
+
+import {
+  definePluginEntry,
+  type OpenClawPluginApi,
+  type ProviderResolveDynamicModelContext,
+  type ProviderRuntimeModel,
+  type ProviderWrapStreamFnContext,
+} from "openclaw/plugin-sdk/plugin-entry";
+import { createProviderApiKeyAuthMethod } from "openclaw/plugin-sdk/provider-auth-api-key";
+import {
+  evaluateComplexity,
+  evaluateComplexityWithLLM,
+  type ComplexityLevel,
+  type EvaluationContext,
+  type LocalApiType,
+  type RouteTarget,
+} from "./complexity.js";
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+} from "@mariozechner/pi-ai";
+
+/** 평가 모드 */
+export type EvaluationMode = "rule" | "llm";
+
+type SmartRouterModelId = "auto" | "local" | "nano" | "mini" | "full";
+
+/** 프로바이더 API 타입 */
+type ProviderApiType = "ollama" | "openai-responses" | "openai-completions" | "openai-codex-responses" | "anthropic-messages" | "google-generative-ai" | "github-copilot" | "bedrock-converse-stream";
+
+// ---------------------------------------------------------------------------
+// Constants & defaults
+// ---------------------------------------------------------------------------
+
+const PROVIDER_ID = "smart-router";
+
+/** 플러그인 설정 기본값 */
+const DEFAULTS = {
+  localProvider: "lmstudio",
+  localModel: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+  localBaseUrl: "http://127.0.0.1:1235/v1",
+  localApi: "openai" as const,
+  remoteProvider: "openai",
+  nanoModel: "gpt-5.4-nano-2026-03-17",
+  miniModel: "gpt-5.4-mini-2026-03-17",
+  fullModel: "gpt-5.4-2026-03-05",
+  remoteBaseUrl: "https://api.openai.com/v1",
+  remoteApi: "openai-responses" as const,
+  threshold: "moderate" as ComplexityLevel,
+  evaluationMode: "rule" as EvaluationMode,
+  evaluationLlmTarget: "nano" as Exclude<RouteTarget, "local">,
+  evaluationTimeoutMs: 15_000,
+  showModelLabel: true,
+} as const;
+
+type ResolvedConfig = ReturnType<typeof resolveConfig>;
+
+type AssistantStream = ReturnType<typeof createAssistantMessageEventStream>;
+
+interface RouteModelConfig {
+  tier: RouteTarget;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  api: ProviderApiType;
+  contextWindow: number;
+  maxTokens: number;
+  label: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** localApi ("openai" | "ollama") → OpenClaw provider api 타입으로 변환 */
+function toProviderApi(localApi: string): ProviderApiType {
+  if (localApi === "ollama") return "ollama";
+  return "openai-completions";
+}
+
+function resolveRouterApiKey(): string {
+  return (
+    process.env.OPENAI_API_KEY?.trim() ||
+    process.env.LMSTUDIO_API_KEY?.trim() ||
+    process.env.OLLAMA_API_KEY?.trim() ||
+    "lm-studio"
+  );
+}
+
+/** 환경변수 또는 기본값에서 설정 해석 */
+function resolveConfig(pluginConfig?: Record<string, unknown>) {
+  const remoteProvider = String(pluginConfig?.remoteProvider ?? DEFAULTS.remoteProvider);
+  const remoteBaseUrl = String(pluginConfig?.remoteBaseUrl ?? DEFAULTS.remoteBaseUrl);
+  const remoteApi = String(pluginConfig?.remoteApi ?? DEFAULTS.remoteApi) as ProviderApiType;
+  const legacyRemoteModel = pluginConfig?.remoteModel;
+
+  return {
+    localProvider: String(pluginConfig?.localProvider ?? DEFAULTS.localProvider),
+    localModel: String(pluginConfig?.localModel ?? DEFAULTS.localModel),
+    localBaseUrl: String(pluginConfig?.localBaseUrl ?? DEFAULTS.localBaseUrl),
+    localApi: String(pluginConfig?.localApi ?? DEFAULTS.localApi) as ProviderApiType,
+    remoteProvider,
+    nanoModel: String(pluginConfig?.nanoModel ?? DEFAULTS.nanoModel),
+    miniModel: String(pluginConfig?.miniModel ?? DEFAULTS.miniModel),
+    fullModel: String(pluginConfig?.fullModel ?? legacyRemoteModel ?? DEFAULTS.fullModel),
+    remoteBaseUrl,
+    remoteApi,
+    threshold: (pluginConfig?.threshold as ComplexityLevel) ?? DEFAULTS.threshold,
+    evaluationMode: (pluginConfig?.evaluationMode as EvaluationMode) ?? DEFAULTS.evaluationMode,
+    evaluationLlmTarget:
+      (pluginConfig?.evaluationLlmTarget as Exclude<RouteTarget, "local"> | undefined) ??
+      DEFAULTS.evaluationLlmTarget,
+    evaluationLlmModel: pluginConfig?.evaluationLlmModel
+      ? String(pluginConfig.evaluationLlmModel)
+      : undefined,
+    evaluationTimeoutMs: Number(pluginConfig?.evaluationTimeoutMs ?? DEFAULTS.evaluationTimeoutMs),
+    showModelLabel:
+      typeof pluginConfig?.showModelLabel === "boolean"
+        ? pluginConfig.showModelLabel
+        : pluginConfig?.showModelLabel === undefined
+          ? DEFAULTS.showModelLabel
+          : String(pluginConfig.showModelLabel).toLowerCase() === "true",
+  };
+}
+
+function resolveRouteModel(config: ResolvedConfig, target: RouteTarget): RouteModelConfig {
+  if (target === "local") {
+    return {
+      tier: "local",
+      provider: PROVIDER_ID,
+      model: config.localModel,
+      baseUrl: config.localBaseUrl,
+      api: toProviderApi(config.localApi as string),
+      contextWindow: 32768,
+      maxTokens: 8192,
+      label: `local:${config.localModel}`,
+    };
+  }
+
+  const modelByTier = {
+    nano: config.nanoModel,
+    mini: config.miniModel,
+    full: config.fullModel,
+  };
+
+  return {
+    tier: target,
+    provider: config.remoteProvider,
+    model: modelByTier[target],
+    baseUrl: config.remoteBaseUrl,
+    api: config.remoteApi,
+    contextWindow: 128000,
+    maxTokens: target === "full" ? 32768 : 16384,
+    label: `${target}:${modelByTier[target]}`,
+  };
+}
+
+function buildModelLabel(route: RouteModelConfig, level: ComplexityLevel): string {
+  return `[smart-router ${route.tier}/${level}] ${route.model}\n\n`;
+}
+
+function buildDirectModelLabel(route: RouteModelConfig): string {
+  return `[smart-router ${route.tier}/direct] ${route.model}\n\n`;
+}
+
+function parseSmartRouterModelId(modelId: unknown): SmartRouterModelId | undefined {
+  switch (String(modelId ?? "").trim()) {
+    case "auto":
+    case "local":
+    case "nano":
+    case "mini":
+    case "full":
+      return String(modelId) as SmartRouterModelId;
+    default:
+      return undefined;
+  }
+}
+
+function stripLeadingModelLabels(text: string): string {
+  let normalized = text;
+
+  while (normalized.startsWith("[smart-router ")) {
+    const lineEnd = normalized.indexOf("\n");
+    if (lineEnd === -1) {
+      return "";
+    }
+
+    normalized = normalized.slice(lineEnd + 1).replace(/^\s+/u, "");
+  }
+
+  return normalized;
+}
+
+function prependModelLabel(text: string, label: string): string {
+  const normalized = stripLeadingModelLabels(text);
+  if (normalized.startsWith(label)) {
+    return normalized;
+  }
+
+  return `${label}${normalized}`;
+}
+
+function ensureLabeledMessage(message: AssistantMessage, label: string): AssistantMessage {
+  const content = [...message.content];
+  const firstTextIndex = content.findIndex((item) => item.type === "text");
+
+  if (firstTextIndex === -1) {
+    content.unshift({ type: "text", text: label });
+    return { ...message, content };
+  }
+
+  const firstText = content[firstTextIndex];
+  if (firstText.type !== "text" || firstText.text.startsWith(label)) {
+    return message;
+  }
+
+  content[firstTextIndex] = {
+    ...firstText,
+    text: prependModelLabel(firstText.text, label),
+  };
+  return { ...message, content };
+}
+
+function wrapStreamWithModelLabel(stream: AssistantStream, label: string): AssistantStream {
+  let injected = false;
+  const wrapped = createAssistantMessageEventStream();
+
+  const patchEvent = (event: AssistantMessageEvent): AssistantMessageEvent => {
+    if (event.type === "text_delta") {
+      if (!injected) {
+        injected = true;
+        return {
+          ...event,
+          delta: prependModelLabel(event.delta, label),
+          partial: ensureLabeledMessage(event.partial, label),
+        };
+      }
+
+      return {
+        ...event,
+        partial: ensureLabeledMessage(event.partial, label),
+      };
+    }
+
+    if (event.type === "text_end") {
+      if (!injected) {
+        injected = true;
+        return {
+          ...event,
+          content: prependModelLabel(event.content, label),
+          partial: ensureLabeledMessage(event.partial, label),
+        };
+      }
+
+      return {
+        ...event,
+        partial: ensureLabeledMessage(event.partial, label),
+      };
+    }
+
+    if (event.type === "done") {
+      return {
+        ...event,
+        message: ensureLabeledMessage(event.message, label),
+      };
+    }
+
+    if (event.type === "error") {
+      return {
+        ...event,
+        error: ensureLabeledMessage(event.error, label),
+      };
+    }
+
+    if ("partial" in event && injected) {
+      return {
+        ...event,
+        partial: ensureLabeledMessage(event.partial, label),
+      };
+    }
+
+    return event;
+  };
+
+  void (async () => {
+    try {
+      for await (const event of stream) {
+        wrapped.push(patchEvent(event));
+      }
+    } catch (error) {
+      throw error;
+    }
+  })();
+
+  return wrapped;
+}
+
+/** 스트림 컨텍스트에서 마지막 user 메시지를 추출 */
+function extractLastUserMessage(context: unknown): string {
+  if (!context || typeof context !== "object") return "";
+  const ctx = context as Record<string, unknown>;
+
+  // pi-agent-core context 구조: { messages: Array<{ role, content }> }
+  const messages = ctx.messages ?? ctx.input ?? ctx.prompt;
+  if (Array.isArray(messages)) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg && typeof msg === "object" && "role" in msg && "content" in msg) {
+        if (msg.role === "user" && typeof msg.content === "string") {
+          return msg.content;
+        }
+        // content가 배열인 경우 (멀티모달)
+        if (msg.role === "user" && Array.isArray(msg.content)) {
+          return msg.content
+            .filter((p: unknown) => p && typeof p === "object" && "text" in (p as Record<string, unknown>))
+            .map((p: unknown) => (p as Record<string, string>).text)
+            .join("\n");
+        }
+      }
+    }
+  }
+
+  // 단순 문자열 prompt
+  if (typeof ctx.prompt === "string") return ctx.prompt;
+  return "";
+}
+
+/** 대화 턴 수를 추출 */
+function extractTurnCount(context: unknown): number {
+  if (!context || typeof context !== "object") return 0;
+  const ctx = context as Record<string, unknown>;
+  const messages = ctx.messages ?? ctx.input;
+  if (Array.isArray(messages)) {
+    return messages.filter(
+      (m: unknown) => m && typeof m === "object" && "role" in m && (m as Record<string, string>).role === "user",
+    ).length;
+  }
+  return 0;
+}
+
+/** 도구 사용 여부 감지 */
+function detectToolUse(context: unknown): boolean {
+  if (!context || typeof context !== "object") return false;
+  const ctx = context as Record<string, unknown>;
+  const messages = ctx.messages ?? ctx.input;
+  if (!Array.isArray(messages)) return false;
+
+  return messages.some((message) => {
+    if (!message || typeof message !== "object") return false;
+    const typedMessage = message as Record<string, unknown>;
+
+    if (typedMessage.role === "toolResult") {
+      return true;
+    }
+
+    if (!Array.isArray(typedMessage.content)) {
+      return false;
+    }
+
+    return typedMessage.content.some(
+      (item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "toolCall",
+    );
+  });
+}
+
+export const __testing = {
+  buildModelLabel,
+  buildDirectModelLabel,
+  stripLeadingModelLabels,
+  prependModelLabel,
+  wrapStreamWithModelLabel,
+  parseSmartRouterModelId,
+};
+
+// ---------------------------------------------------------------------------
+// Plugin entry
+// ---------------------------------------------------------------------------
+
+export default definePluginEntry({
+  id: "smart-router",
+  name: "Smart LLM Router",
+  description: "요청 복잡도에 따라 로컬/외부 LLM을 자동 라우팅",
+
+  register(api: OpenClawPluginApi) {
+    // api.pluginConfig = plugins.entries["smart-router"].config 의 검증된 값
+    const pluginConfig = resolveConfig(api.pluginConfig);
+
+    api.registerProvider({
+      id: PROVIDER_ID,
+      label: "Smart Router",
+      docsPath: "/providers/smart-router",
+      envVars: ["OPENAI_API_KEY"],
+      aliases: ["router", "hybrid"],
+
+      // ---------------------------------------------------------------
+      // Auth: OpenAI API key 하나로 local + remote를 모두 처리
+      // ---------------------------------------------------------------
+      auth: [
+        createProviderApiKeyAuthMethod({
+          providerId: PROVIDER_ID,
+          methodId: "openai-api-key",
+          label: "OpenAI API key",
+          hint: "OpenAI API key 하나로 LM Studio와 OpenAI를 함께 라우팅",
+          optionKey: "openaiApiKey",
+          flagName: "--openai-api-key",
+          envVar: "OPENAI_API_KEY",
+          promptMessage: "Enter OpenAI API key for smart-router",
+          defaultModel: "auto",
+          expectedProviders: [PROVIDER_ID],
+          wizard: {
+            choiceId: "smart-router-openai-api-key",
+            choiceLabel: "Smart Router with OpenAI API key",
+            groupId: "smart-router",
+            groupLabel: "Smart Router",
+            groupHint: "LM Studio local + OpenAI remote",
+          },
+        }),
+      ],
+
+      // ---------------------------------------------------------------
+      // Model catalog: auto + direct model selections
+      // ---------------------------------------------------------------
+      catalog: {
+        order: "late",
+        run: async () => ({
+          provider: {
+            baseUrl: pluginConfig.localBaseUrl,
+            apiKey: resolveRouterApiKey(),
+            api: toProviderApi(pluginConfig.localApi as string),
+            models: [
+              {
+                id: "auto",
+                name: "Smart Auto (로컬 우선, 자동 라우팅)",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 32768,
+                maxTokens: 8192,
+              },
+              {
+                id: "local",
+                name: "Smart Local (LM Studio 직접)",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 32768,
+                maxTokens: 8192,
+              },
+              {
+                id: "nano",
+                name: "Smart Nano (직접 선택)",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 128000,
+                maxTokens: 16384,
+              },
+              {
+                id: "mini",
+                name: "Smart Mini (직접 선택)",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 128000,
+                maxTokens: 16384,
+              },
+              {
+                id: "full",
+                name: "Smart Full (직접 선택)",
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 128000,
+                maxTokens: 32768,
+              },
+            ],
+          },
+        }),
+      },
+
+      // ---------------------------------------------------------------
+      // Dynamic model resolution
+      // ---------------------------------------------------------------
+      resolveDynamicModel: (
+        ctx: ProviderResolveDynamicModelContext,
+      ): ProviderRuntimeModel | undefined => {
+        const selectedModelId = parseSmartRouterModelId(ctx.modelId);
+
+        return {
+          id: selectedModelId ?? ctx.modelId,
+          name: selectedModelId ? `Smart ${selectedModelId}` : ctx.modelId,
+          api: toProviderApi(pluginConfig.localApi as string),
+          provider: PROVIDER_ID,
+          baseUrl: pluginConfig.localBaseUrl,
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 32768,
+          maxTokens: 8192,
+        };
+      },
+
+      // ---------------------------------------------------------------
+      // Stream wrapper: 복잡도 기반 라우팅의 핵심
+      // ---------------------------------------------------------------
+      wrapStreamFn: (ctx: ProviderWrapStreamFnContext) => {
+        const baseStreamFn = ctx.streamFn;
+        if (!baseStreamFn) return undefined;
+
+        return async (model: unknown, context: unknown, options: unknown) => {
+          const requestedModelId = parseSmartRouterModelId((model as Record<string, unknown>)?.id);
+
+          if (requestedModelId && requestedModelId !== "auto") {
+            const routed = resolveRouteModel(pluginConfig, requestedModelId);
+            console.log(`[smart-router] 🎯 direct selection → ${routed.label}`);
+
+            const directModel = {
+              ...(model as Record<string, unknown>),
+              id: routed.model,
+              api: routed.api,
+              baseUrl: routed.baseUrl,
+              provider: routed.provider,
+              contextWindow: routed.contextWindow,
+              maxTokens: routed.maxTokens,
+            };
+
+            const stream = (await baseStreamFn(
+              directModel as Parameters<typeof baseStreamFn>[0],
+              context as Parameters<typeof baseStreamFn>[1],
+              options as Parameters<typeof baseStreamFn>[2],
+            )) as AssistantStream;
+
+            if (!pluginConfig.showModelLabel) {
+              return stream;
+            }
+
+            return wrapStreamWithModelLabel(stream, buildDirectModelLabel(routed));
+          }
+
+          // 1. 메시지 추출
+          const lastMessage = extractLastUserMessage(context);
+          const evalContext: EvaluationContext = {
+            turnCount: extractTurnCount(context),
+            hasToolUse: detectToolUse(context),
+          };
+
+          // 2. 평가 모드에 따라 복잡도 판별
+          const decision =
+            pluginConfig.evaluationMode === "llm"
+              ? await evaluateComplexityWithLLM(
+                  lastMessage,
+                  pluginConfig.remoteBaseUrl,
+                  pluginConfig.evaluationLlmModel ??
+                    resolveRouteModel(
+                      pluginConfig,
+                      pluginConfig.evaluationLlmTarget,
+                    ).model,
+                  evalContext,
+                  pluginConfig.threshold,
+                  pluginConfig.evaluationTimeoutMs,
+                  pluginConfig.remoteApi === "openai-responses"
+                    ? "openai-responses"
+                    : "openai" as LocalApiType,
+                  pluginConfig.remoteBaseUrl.includes("api.openai.com")
+                    ? process.env.OPENAI_API_KEY?.trim()
+                    : undefined,
+                )
+              : evaluateComplexity(lastMessage, evalContext, pluginConfig.threshold);
+
+          const routed = resolveRouteModel(pluginConfig, decision.target);
+
+          // 3. 라우팅 결정 로그
+          const logPrefix = `[smart-router]`;
+          const targetEmoji = decision.target === "local" ? "🏠" : "☁️";
+          const modeTag = pluginConfig.evaluationMode === "llm" ? "LLM" : "rule";
+          console.log(
+            `${logPrefix} ${targetEmoji} ${decision.level} (score: ${decision.score.total}, eval: ${modeTag}) → ${routed.label} | ${decision.reason}`,
+          );
+
+          const routedModel = {
+            ...(model as Record<string, unknown>),
+            id: routed.model,
+            api: routed.api,
+            baseUrl: routed.baseUrl,
+            provider: routed.provider,
+            contextWindow: routed.contextWindow,
+            maxTokens: routed.maxTokens,
+          };
+
+          const stream = (await baseStreamFn(
+            routedModel as Parameters<typeof baseStreamFn>[0],
+            context as Parameters<typeof baseStreamFn>[1],
+            options as Parameters<typeof baseStreamFn>[2],
+          )) as AssistantStream;
+
+          if (!pluginConfig.showModelLabel) {
+            return stream;
+          }
+
+          return wrapStreamWithModelLabel(stream, buildModelLabel(routed, decision.level));
+        };
+      },
+
+      // ---------------------------------------------------------------
+      // Thinking: adaptive 기본값 (프로바이더 수준에서 적응형 사고)
+      // ---------------------------------------------------------------
+      resolveDefaultThinkingLevel: () => "adaptive",
+    });
+  },
+});

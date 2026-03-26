@@ -1,0 +1,98 @@
+{
+  "id": "smart-router",
+  "providers": ["smart-router"],
+  "providerAuthEnvVars": {
+    "smart-router": ["OPENAI_API_KEY"]
+  },
+  "providerAuthChoices": [
+    {
+      "provider": "smart-router",
+      "method": "openai-api-key",
+      "choiceId": "smart-router-openai-api-key",
+      "choiceLabel": "Smart Router with OpenAI API key",
+      "choiceHint": "OpenAI API key 하나로 LM Studio와 OpenAI를 함께 라우팅",
+      "groupId": "smart-router",
+      "groupLabel": "Smart Router",
+      "groupHint": "LM Studio local + OpenAI remote"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "localProvider": {
+        "type": "string",
+        "description": "로컬 LLM 프로바이더 ID (예: lmstudio, ollama)"
+      },
+      "localModel": {
+        "type": "string",
+        "description": "로컬 LLM 모델 ID (예: lmstudio-community/LFM2-24B-A2B-MLX-4bit)"
+      },
+      "localBaseUrl": {
+        "type": "string",
+        "description": "로컬 LLM API 기본 URL (예: http://127.0.0.1:1235/v1)"
+      },
+      "localApi": {
+        "type": "string",
+        "enum": ["openai", "ollama"],
+        "description": "로컬 LLM API 타입: openai (LM Studio 등 OpenAI 호환) 또는 ollama. 기본: openai"
+      },
+      "remoteProvider": {
+        "type": "string",
+        "description": "외부 LLM 프로바이더 ID (예: openai)"
+      },
+      "nanoModel": {
+        "type": "string",
+        "description": "직접 nano 선택 또는 llm 분류 모드에서 사용하는 Nano 모델 ID (예: gpt-5.4-nano-2026-03-17)"
+      },
+      "miniModel": {
+        "type": "string",
+        "description": "기본 auto 라우팅에서 점수 4~6 구간에 사용하는 Mini 모델 ID (예: gpt-5.4-mini-2026-03-17)"
+      },
+      "fullModel": {
+        "type": "string",
+        "description": "기본 auto 라우팅에서 점수 7 이상 구간에 사용하는 Full 모델 ID (예: gpt-5.4-2026-03-05)"
+      },
+      "remoteModel": {
+        "type": "string",
+        "description": "레거시 호환용 full tier 모델 별칭. fullModel 미설정 시 사용"
+      },
+      "remoteBaseUrl": {
+        "type": "string",
+        "description": "외부 LLM API 기본 URL (예: https://api.openai.com/v1)"
+      },
+      "remoteApi": {
+        "type": "string",
+        "enum": ["openai-responses", "openai-completions", "openai-codex-responses", "anthropic-messages"],
+        "description": "외부 LLM API 타입. 기본: openai-responses"
+      },
+      "threshold": {
+        "type": "string",
+        "enum": ["simple", "moderate", "complex", "advanced"],
+        "description": "auto 라우팅에서 외부 승격을 시작하는 최저 레벨. 기본 moderate면 0~3 local, 4~6 mini, 7+ full"
+      },
+      "evaluationMode": {
+        "type": "string",
+        "enum": ["rule", "llm"],
+        "description": "복잡도 평가 방식: rule (키워드/점수 규칙) 또는 llm (분류 모델 질의). 기본: rule"
+      },
+      "evaluationLlmTarget": {
+        "type": "string",
+        "enum": ["nano", "mini", "full"],
+        "description": "llm 평가 모드에서 사용할 분류 모델 tier. 기본: nano"
+      },
+      "evaluationLlmModel": {
+        "type": "string",
+        "description": "llm 평가 모드에서 사용할 분류 모델 ID override"
+      },
+      "evaluationTimeoutMs": {
+        "type": "number",
+        "description": "LLM 평가 타임아웃 (ms). 초과 시 rule 기반으로 fallback. 기본: 10000"
+      },
+      "showModelLabel": {
+        "type": "boolean",
+        "description": "응답 첫 줄에 선택된 모델/tier 라벨을 표시할지 여부. 기본: true"
+      }
+    }
+  }
+}

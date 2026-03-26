@@ -1,0 +1,16 @@
+{
+  "name": "@myopenclaw/smart-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw smart router plugin – 요청 복잡도에 따라 로컬/외부 LLM을 자동 라우팅",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "openclaw": "*",
+    "vitest": "^4.1.1"
+  }
+}

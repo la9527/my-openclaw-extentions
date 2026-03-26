@@ -1,0 +1,307 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  evaluateComplexity,
+  evaluateComplexityWithLLM,
+  formatComplexityLevel,
+  formatRoutingDecision,
+  routeTargetFromLevel,
+  type EvaluationContext,
+  type RoutingDecision,
+} from "./complexity.js";
+
+describe("routeTargetFromLevel", () => {
+  it("기본 threshold=moderate 에서 local/mini/full 매핑을 적용한다", () => {
+    expect(routeTargetFromLevel("simple")).toBe("local");
+    expect(routeTargetFromLevel("moderate")).toBe("mini");
+    expect(routeTargetFromLevel("complex")).toBe("full");
+    expect(routeTargetFromLevel("advanced")).toBe("full");
+  });
+
+  it("threshold=complex 면 moderate 는 local 유지", () => {
+    expect(routeTargetFromLevel("moderate", "complex")).toBe("local");
+    expect(routeTargetFromLevel("complex", "complex")).toBe("full");
+  });
+
+  it("threshold=advanced 면 advanced 만 full 로 보낸다", () => {
+    expect(routeTargetFromLevel("complex", "advanced")).toBe("local");
+    expect(routeTargetFromLevel("advanced", "advanced")).toBe("full");
+  });
+});
+
+describe("evaluateComplexity", () => {
+  it("짧은 인사는 simple/local", () => {
+    const decision = evaluateComplexity("안녕하세요");
+    expect(decision.level).toBe("simple");
+    expect(decision.target).toBe("local");
+  });
+
+  it("중간 길이 설명 요청은 기본적으로 mini tier 로 간다", () => {
+    const decision = evaluateComplexity("파이썬에 대해 단계별로 간단히 설명해줘".padEnd(260, " "));
+    expect(decision.level).toBe("moderate");
+    expect(decision.target).toBe("mini");
+  });
+
+  it("코드 리팩토링 요청은 full tier 로 간다", () => {
+    const message = [
+      "이 코드를 리팩토링하고 구조를 개선해줘.",
+      "```ts",
+      "async function fetchData() {",
+      "  const result = await fetch(url);",
+      "  return result.json();",
+      "}",
+      "```",
+      "API endpoint 구조와 성능도 같이 봐줘.",
+    ].join("\n");
+
+    const decision = evaluateComplexity(message);
+    expect(decision.level).toBe("complex");
+    expect(decision.target).toBe("full");
+  });
+
+  it("긴 코드와 도구 맥락이 있으면 full tier 로 간다", () => {
+    const code = "```typescript\n" + "const value = 1;\n".repeat(120) + "```";
+    const context: EvaluationContext = { turnCount: 16, hasToolUse: true };
+    const decision = evaluateComplexity(
+      `${code}\n이 아키텍처를 분석하고 보안, 성능, 마이그레이션 전략까지 설계해줘.`,
+      context,
+    );
+
+    expect(decision.level).toBe("advanced");
+    expect(decision.target).toBe("full");
+  });
+
+  it("score breakdown 을 계산한다", () => {
+    const decision = evaluateComplexity("REST API endpoint 를 만들어서 database query 최적화해줘", {
+      hasToolUse: true,
+      turnCount: 7,
+    });
+
+    expect(decision.score.breakdown.tools).toBeGreaterThanOrEqual(2);
+    expect(decision.score.breakdown.depth).toBe(2);
+    expect(decision.score.total).toBeGreaterThan(0);
+  });
+
+  it("threshold=complex 면 moderate 는 local 유지", () => {
+    const decision = evaluateComplexity("파이썬에 대해 단계별로 간단히 설명해줘".padEnd(260, " "), undefined, "complex");
+    expect(decision.level).toBe("moderate");
+    expect(decision.target).toBe("local");
+  });
+
+  it("threshold=simple 이어도 짧은 인사는 local 로 고정한다", () => {
+    const decision = evaluateComplexity("안녕", { turnCount: 12 }, "simple");
+    expect(decision.level).toBe("simple");
+    expect(decision.target).toBe("local");
+  });
+});
+
+describe("evaluateComplexityWithLLM", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("빈 메시지는 fetch 없이 규칙 기반으로 처리한다", async () => {
+    const decision = await evaluateComplexityWithLLM("", "http://localhost:1235/v1", "test-model");
+    expect(decision.target).toBe("local");
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("OpenAI Responses 응답을 파싱해 full tier 를 반환한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output_text: '{"level":"complex","reason":"코드 리팩토링 요청"}',
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "이 코드를 리팩토링해줘",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.level).toBe("complex");
+    expect(decision.target).toBe("full");
+    expect(decision.reason).toContain("[LLM]");
+  });
+
+  it("threshold=moderate 에서 moderate 분류는 mini tier 로 간다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: '{"level":"moderate","reason":"일반 질문"}' }],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "파이썬 설명해줘",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.target).toBe("mini");
+  });
+
+  it("threshold=complex 에서 moderate 분류는 local 유지", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"level":"moderate","reason":"일반 질문"}' } }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "파이썬 설명해줘",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "complex",
+      5000,
+      "openai",
+    );
+
+    expect(decision.target).toBe("local");
+  });
+
+  it("Ollama 응답 포맷도 지원한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          message: { content: '{"level":"advanced","reason":"깊은 시스템 설계"}' },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "전체 마이크로서비스 아키텍처를 설계해줘",
+      "http://localhost:11434",
+      "qwen3:8b",
+      undefined,
+      "moderate",
+      5000,
+      "ollama",
+    );
+
+    expect(decision.target).toBe("full");
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("http://localhost:11434/api/chat");
+  });
+
+  it("잘못된 JSON 응답이면 규칙 기반으로 fallback 한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "invalid-json" } }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "테스트 메시지",
+      "http://localhost:1235/v1",
+      "test-model",
+      undefined,
+      "moderate",
+      5000,
+      "openai",
+    );
+
+    expect(decision).toEqual(evaluateComplexity("테스트 메시지", undefined, "moderate"));
+  });
+
+  it("HTTP 에러면 규칙 기반으로 fallback 한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("failure", { status: 500 }));
+
+    const decision = await evaluateComplexityWithLLM(
+      "안녕하세요",
+      "http://localhost:1235/v1",
+      "test-model",
+      undefined,
+      "moderate",
+      5000,
+      "openai",
+    );
+
+    expect(decision).toEqual(evaluateComplexity("안녕하세요", undefined, "moderate"));
+  });
+
+  it("OpenAI 요청 body 는 고정 파라미터를 포함한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output_text: '{"level":"simple","reason":"인사"}',
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await evaluateComplexityWithLLM(
+      "안녕",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("http://localhost:1235/v1/responses");
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+    expect(body.model).toBe("gpt-5.4-nano-2026-03-17");
+    expect(body.temperature).toBe(0);
+    expect(body.max_output_tokens).toBe(128);
+    expect(body.input).toHaveLength(2);
+    expect(body.text.format.type).toBe("json_schema");
+  });
+});
+
+describe("format helpers", () => {
+  it.each([
+    ["simple", "단순 (Simple)"],
+    ["moderate", "보통 (Moderate)"],
+    ["complex", "복잡 (Complex)"],
+    ["advanced", "고급 (Advanced)"],
+  ] as const)("formatComplexityLevel(%s)", (level, expected) => {
+    expect(formatComplexityLevel(level)).toBe(expected);
+  });
+
+  it("formatRoutingDecision 에 tier 라벨을 포함한다", () => {
+    const decision: RoutingDecision = {
+      level: "complex",
+      score: {
+        total: 9,
+        breakdown: { length: 1, code: 3, tools: 2, depth: 1, keywords: 2 },
+      },
+      target: "full",
+      reason: "코드 분석 필요, 도구 사용 감지",
+    };
+
+    const formatted = formatRoutingDecision(decision);
+    expect(formatted).toContain("복잡 (Complex)");
+    expect(formatted).toContain("OpenAI Full");
+    expect(formatted).toContain("점수: 9/17");
+  });
+});
