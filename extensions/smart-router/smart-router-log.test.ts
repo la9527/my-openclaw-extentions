@@ -47,6 +47,9 @@ describe("smart-router execution logger", () => {
       thinkingLevel: "low",
       workspaceDir: "/workspace/demo",
       agentDir: "/agent/demo",
+      sessionId: "sess-1",
+      turnIndex: 1,
+      rootTurnId: "sess-1:turn:1",
       context: {
         systemPrompt: "test system prompt",
         messages: [
@@ -62,6 +65,26 @@ describe("smart-router execution logger", () => {
         scoreTotal: 4,
         scoreBreakdown: { length: 1, code: 0, tools: 1, depth: 1, keywords: 1 },
       },
+    });
+
+    requestLogger.logEvaluation({
+      mode: "llm",
+      apiType: "openai-responses",
+      model: "gpt-5.4-mini-2026-03-17",
+      baseUrl: "https://api.openai.com/v1",
+      endpoint: "https://api.openai.com/v1/responses",
+      durationMs: 42,
+      messageChars: 12,
+      turnCount: 1,
+      hasToolUse: true,
+      threshold: "moderate",
+      promptChars: 512,
+      usage: { input: 44, output: 12, cacheRead: 0, cacheWrite: 0, totalTokens: 56 },
+      httpStatus: 200,
+      classifierLevel: "moderate",
+      classifierReason: "일반 설명 요청",
+      finalTarget: "mini",
+      fallbackToRule: false,
     });
 
     requestLogger.logRoute();
@@ -125,14 +148,70 @@ describe("smart-router execution logger", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-    expect(lines).toHaveLength(3);
-    expect(lines.map((line) => line.event)).toEqual(["route", "payload", "response"]);
-    expect(lines[0]?.routeTier).toBe("mini");
-    expect(lines[0]?.decision).toMatchObject({ level: "moderate", scoreTotal: 4 });
-    expect(lines[1]?.payloadSummary).toMatchObject({ toolCount: 1 });
-    expect(lines[1]?.payload).toMatchObject({ authorization: "<redacted>" });
-    expect(lines[2]?.usage).toMatchObject({ totalTokens: 168 });
-    expect(lines[2]?.responseSummary).toMatchObject({ textChars: 22, stopReason: "stop" });
+    expect(lines).toHaveLength(4);
+    expect(lines.map((line) => line.event)).toEqual(["evaluation", "route", "payload", "response"]);
+    expect(lines[0]?.evaluation).toMatchObject({ classifierLevel: "moderate", finalTarget: "mini" });
+    expect(lines[1]?.routeTier).toBe("mini");
+    expect(lines[1]?.decision).toMatchObject({ level: "moderate", scoreTotal: 4 });
+    expect(lines[1]?.rootTurnId).toBe("sess-1:turn:1");
+    expect(lines[1]?.sessionId).toBe("sess-1");
+    expect(lines[2]?.payloadSummary).toMatchObject({ toolCount: 1 });
+    expect(lines[2]?.payload).toMatchObject({ authorization: "<redacted>" });
+    expect(lines[3]?.usage).toMatchObject({ totalTokens: 168 });
+    expect(lines[3]?.responseSummary).toMatchObject({ textChars: 22, stopReason: "stop" });
+  });
+
+  it("links repeated requests in the same turn with parentRequestId", async () => {
+    const filePath = await createTempLogPath();
+    const logger = createSmartRouterLogger({ enabled: true, filePath });
+
+    const firstRequest = logger.createRequest({
+      requestedModelId: "auto",
+      routeMode: "auto",
+      evaluationMode: "llm",
+      threshold: "moderate",
+      routeTier: "full",
+      routeProvider: "openai",
+      routeModel: "gpt-5.4-2026-03-05",
+      routeApi: "openai-responses",
+      routeLabel: "full:gpt-5.4-2026-03-05",
+      sessionId: "sess-chain",
+      turnIndex: 1,
+      rootTurnId: "sess-chain:turn:1",
+      context: { messages: [{ role: "user", content: "first" }] },
+    });
+    firstRequest.logRoute();
+
+    const secondRequest = logger.createRequest({
+      requestedModelId: "auto",
+      routeMode: "auto",
+      evaluationMode: "llm",
+      threshold: "moderate",
+      routeTier: "full",
+      routeProvider: "openai",
+      routeModel: "gpt-5.4-2026-03-05",
+      routeApi: "openai-responses",
+      routeLabel: "full:gpt-5.4-2026-03-05",
+      sessionId: "sess-chain",
+      turnIndex: 1,
+      rootTurnId: "sess-chain:turn:1",
+      context: { messages: [{ role: "assistant", content: "tool follow-up" }] },
+    });
+    secondRequest.logRoute();
+
+    await logger.flush();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const datedLogPath = filePath.replace(/\.jsonl$/u, `-${today}.jsonl`);
+    const lines = (await readFile(datedLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.parentRequestId).toBeUndefined();
+    expect(lines[1]?.parentRequestId).toBe(firstRequest.requestId);
+    expect(lines[1]?.rootTurnId).toBe("sess-chain:turn:1");
   });
 
   it("prunes dated log files older than the configured retention window", async () => {

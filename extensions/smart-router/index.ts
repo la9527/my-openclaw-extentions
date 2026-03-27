@@ -24,6 +24,7 @@ import {
   evaluateComplexity,
   evaluateComplexityWithLLM,
   type ComplexityLevel,
+  type EvaluationTrace,
   type EvaluationContext,
   type LocalApiType,
   type RouteTarget,
@@ -439,6 +440,49 @@ function detectToolUse(context: unknown): boolean {
   });
 }
 
+function extractSessionId(options: unknown): string | undefined {
+  if (!options || typeof options !== "object") {
+    return undefined;
+  }
+
+  const sessionId = (options as Record<string, unknown>).sessionId;
+  if (typeof sessionId !== "string") {
+    return undefined;
+  }
+
+  const trimmed = sessionId.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function buildRootTurnId(sessionId: string | undefined, turnIndex: number): string | undefined {
+  if (!sessionId) {
+    return undefined;
+  }
+  return `${sessionId}:turn:${turnIndex}`;
+}
+
+function buildRuleEvaluationTrace(
+  decision: ReturnType<typeof evaluateComplexity>,
+  context: EvaluationContext,
+  threshold: ComplexityLevel,
+  startedAt: number,
+  message: string,
+): EvaluationTrace {
+  return {
+    mode: "rule",
+    apiType: "rule",
+    durationMs: Date.now() - startedAt,
+    messageChars: message.length,
+    turnCount: context.turnCount,
+    hasToolUse: context.hasToolUse,
+    threshold,
+    classifierLevel: decision.level,
+    classifierReason: decision.reason,
+    finalTarget: decision.target,
+    fallbackToRule: false,
+  };
+}
+
 export const __testing = {
   buildModelLabel,
   buildDirectModelLabel,
@@ -592,6 +636,9 @@ export default definePluginEntry({
 
         return async (model: unknown, context: unknown, options: unknown) => {
           const requestedModelId = parseSmartRouterModelId((model as Record<string, unknown>)?.id);
+          const sessionId = extractSessionId(options);
+          const turnIndex = extractTurnCount(context);
+          const rootTurnId = buildRootTurnId(sessionId, turnIndex);
 
           if (requestedModelId && requestedModelId !== "auto") {
             const routed = resolveRouteModel(pluginConfig, requestedModelId);
@@ -609,6 +656,9 @@ export default definePluginEntry({
               thinkingLevel: ctx.thinkingLevel,
               workspaceDir: ctx.workspaceDir,
               agentDir: ctx.agentDir,
+              sessionId,
+              turnIndex,
+              rootTurnId,
               context,
               extraParams: ctx.extraParams,
               streamOptions: options,
@@ -647,9 +697,10 @@ export default definePluginEntry({
           // 1. 메시지 추출
           const lastMessage = extractLastUserMessage(context);
           const evalContext: EvaluationContext = {
-            turnCount: extractTurnCount(context),
+            turnCount: turnIndex,
             hasToolUse: detectToolUse(context),
           };
+          let evaluationTrace: EvaluationTrace | undefined;
 
           // 2. 평가 모드에 따라 복잡도 판별
           const decision =
@@ -671,8 +722,22 @@ export default definePluginEntry({
                   pluginConfig.remoteBaseUrl.includes("api.openai.com")
                     ? process.env.OPENAI_API_KEY?.trim()
                     : undefined,
+                  (trace) => {
+                    evaluationTrace = trace;
+                  },
                 )
-              : evaluateComplexity(lastMessage, evalContext, pluginConfig.threshold);
+              : (() => {
+                  const evaluationStartedAt = Date.now();
+                  const ruleDecision = evaluateComplexity(lastMessage, evalContext, pluginConfig.threshold);
+                  evaluationTrace = buildRuleEvaluationTrace(
+                    ruleDecision,
+                    evalContext,
+                    pluginConfig.threshold,
+                    evaluationStartedAt,
+                    lastMessage,
+                  );
+                  return ruleDecision;
+                })();
 
           const routed = resolveRouteModel(pluginConfig, decision.target);
           const requestLogger = executionLogger.createRequest({
@@ -688,6 +753,9 @@ export default definePluginEntry({
             thinkingLevel: ctx.thinkingLevel,
             workspaceDir: ctx.workspaceDir,
             agentDir: ctx.agentDir,
+            sessionId,
+            turnIndex,
+            rootTurnId,
             context,
             extraParams: ctx.extraParams,
             streamOptions: options,
@@ -698,6 +766,9 @@ export default definePluginEntry({
               scoreBreakdown: decision.score.breakdown,
             },
           });
+          if (evaluationTrace) {
+            requestLogger.logEvaluation(evaluationTrace);
+          }
           requestLogger.logRoute();
 
           // 3. 라우팅 결정 로그

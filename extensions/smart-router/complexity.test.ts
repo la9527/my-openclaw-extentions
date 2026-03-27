@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   evaluateComplexity,
   evaluateComplexityWithLLM,
+  type EvaluationTrace,
   formatComplexityLevel,
   formatRoutingDecision,
   routeTargetFromLevel,
@@ -110,10 +111,19 @@ describe("evaluateComplexityWithLLM", () => {
   });
 
   it("OpenAI Responses 응답을 파싱해 full tier 를 반환한다", async () => {
+    const traces: EvaluationTrace[] = [];
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           output_text: '{"level":"complex","reason":"코드 리팩토링 요청"}',
+          usage: {
+            input_tokens: 31,
+            output_tokens: 9,
+            total_tokens: 40,
+            input_tokens_details: {
+              cached_tokens: 7,
+            },
+          },
         }),
         { status: 200 },
       ),
@@ -127,11 +137,20 @@ describe("evaluateComplexityWithLLM", () => {
       "moderate",
       5000,
       "openai-responses",
+      undefined,
+      (trace) => traces.push(trace),
     );
 
     expect(decision.level).toBe("complex");
     expect(decision.target).toBe("full");
     expect(decision.reason).toContain("[LLM]");
+    expect(traces[0]).toMatchObject({
+      mode: "llm",
+      apiType: "openai-responses",
+      finalTarget: "full",
+      fallbackToRule: false,
+      usage: { input: 31, output: 9, cacheRead: 7, totalTokens: 40 },
+    });
   });
 
   it("threshold=moderate 에서 moderate 분류는 mini tier 로 간다", async () => {
@@ -210,6 +229,7 @@ describe("evaluateComplexityWithLLM", () => {
   });
 
   it("잘못된 JSON 응답이면 규칙 기반으로 fallback 한다", async () => {
+    const traces: EvaluationTrace[] = [];
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -227,9 +247,13 @@ describe("evaluateComplexityWithLLM", () => {
       "moderate",
       5000,
       "openai",
+      undefined,
+      (trace) => traces.push(trace),
     );
 
     expect(decision).toEqual(evaluateComplexity("테스트 메시지", undefined, "moderate"));
+    expect(traces[0]?.fallbackToRule).toBe(true);
+    expect(traces[0]?.error).toContain("invalid-json");
   });
 
   it("HTTP 에러면 규칙 기반으로 fallback 한다", async () => {

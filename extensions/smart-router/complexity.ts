@@ -31,6 +31,35 @@ export interface RoutingDecision {
   reason: string;
 }
 
+export interface EvaluationUsageSummary {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+}
+
+export interface EvaluationTrace {
+  mode: "rule" | "llm";
+  apiType: LocalApiType | "rule";
+  model?: string;
+  baseUrl?: string;
+  endpoint?: string;
+  durationMs: number;
+  messageChars: number;
+  turnCount?: number;
+  hasToolUse?: boolean;
+  threshold: ComplexityLevel;
+  promptChars?: number;
+  usage?: EvaluationUsageSummary;
+  httpStatus?: number;
+  classifierLevel?: ComplexityLevel;
+  classifierReason?: string;
+  finalTarget: RouteTarget;
+  fallbackToRule: boolean;
+  error?: string;
+}
+
 export interface EvaluationContext {
   /** 현재 대화 턴 수 */
   turnCount?: number;
@@ -314,6 +343,17 @@ interface OpenAIChatResponse {
 /** OpenAI /v1/responses 응답 타입 */
 interface OpenAIResponsesResponse {
   output_text?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    input_tokens_details?: {
+      cached_tokens?: number;
+    };
+    output_tokens_details?: {
+      reasoning_tokens?: number;
+    };
+  };
   output?: Array<{
     type?: string;
     content?: Array<{
@@ -325,6 +365,48 @@ interface OpenAIResponsesResponse {
 
 /** 로컬 LLM API 타입 */
 export type LocalApiType = "ollama" | "openai" | "openai-responses";
+
+type UsageContainer = {
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
+  };
+  prompt_eval_count?: number;
+  eval_count?: number;
+};
+
+function normalizeUsageSummary(input = 0, output = 0, cacheRead = 0, cacheWrite = 0, totalTokens = 0): EvaluationUsageSummary {
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+  };
+}
+
+function extractEvaluationUsage(payload: OpenAIResponsesResponse & OpenAIChatResponse & OllamaChatResponse & UsageContainer): EvaluationUsageSummary | undefined {
+  if (payload.usage) {
+    const openAiUsage = payload.usage as OpenAIResponsesResponse["usage"] & UsageContainer["usage"];
+    const input = openAiUsage?.input_tokens ?? openAiUsage?.prompt_tokens ?? 0;
+    const output = openAiUsage?.output_tokens ?? openAiUsage?.completion_tokens ?? 0;
+    const cacheRead = openAiUsage?.input_tokens_details?.cached_tokens ?? openAiUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+    const totalTokens = openAiUsage?.total_tokens ?? input + output;
+    return normalizeUsageSummary(input, output, cacheRead, 0, totalTokens);
+  }
+
+  if (typeof payload.prompt_eval_count === "number" || typeof payload.eval_count === "number") {
+    const input = payload.prompt_eval_count ?? 0;
+    const output = payload.eval_count ?? 0;
+    return normalizeUsageSummary(input, output, 0, 0, input + output);
+  }
+
+  return undefined;
+}
 
 function extractOpenAIResponseText(payload: OpenAIResponsesResponse | OpenAIChatResponse): string {
   if ("output_text" in payload && typeof payload.output_text === "string" && payload.output_text.trim()) {
@@ -368,15 +450,38 @@ export async function evaluateComplexityWithLLM(
   timeoutMs = 10_000,
   apiType: LocalApiType = "openai",
   apiKey?: string,
+  onTrace?: (trace: EvaluationTrace) => void,
 ): Promise<RoutingDecision> {
+  const startedAt = Date.now();
+  const emitTrace = (trace: Omit<EvaluationTrace, "durationMs" | "messageChars" | "turnCount" | "hasToolUse" | "threshold">) => {
+    onTrace?.({
+      durationMs: Date.now() - startedAt,
+      messageChars: message.length,
+      turnCount: context?.turnCount,
+      hasToolUse: context?.hasToolUse,
+      threshold: remoteThreshold,
+      ...trace,
+    });
+  };
+
   // 빈 메시지는 규칙 기반으로 바로 처리
   if (!message.trim()) {
-    return evaluateComplexity(message, context, remoteThreshold);
+    const decision = evaluateComplexity(message, context, remoteThreshold);
+    emitTrace({
+      mode: "rule",
+      apiType: "rule",
+      finalTarget: decision.target,
+      classifierLevel: decision.level,
+      classifierReason: decision.reason,
+      fallbackToRule: false,
+    });
+    return decision;
   }
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => controller.abort(), timeoutMs);
 
     // API 타입에 따라 엔드포인트와 요청 포맷 분기
     const isOllama = apiType === "ollama";
@@ -444,6 +549,8 @@ export async function evaluateComplexityWithLLM(
           max_tokens: 128,
         };
 
+      const promptChars = LLM_CLASSIFIER_PROMPT.length + message.length;
+
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -456,14 +563,28 @@ export async function evaluateComplexityWithLLM(
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
-
     if (!response.ok) {
       console.warn(`[smart-router] LLM 평가 실패 (HTTP ${response.status}), 규칙 기반으로 fallback`);
-      return evaluateComplexity(message, context, remoteThreshold);
+      const fallbackDecision = evaluateComplexity(message, context, remoteThreshold);
+      emitTrace({
+        mode: "llm",
+        apiType,
+        model,
+        baseUrl,
+        endpoint: url,
+        promptChars,
+        httpStatus: response.status,
+        finalTarget: fallbackDecision.target,
+        classifierLevel: fallbackDecision.level,
+        classifierReason: fallbackDecision.reason,
+        fallbackToRule: true,
+        error: `HTTP ${response.status}`,
+      });
+      return fallbackDecision;
     }
 
     const data = (await response.json()) as OllamaChatResponse & OpenAIChatResponse & OpenAIResponsesResponse;
+    const usage = extractEvaluationUsage(data);
     const content = isOllama
       ? (data.message?.content?.trim() ?? "")
       : extractOpenAIResponseText(data);
@@ -479,7 +600,23 @@ export async function evaluateComplexityWithLLM(
 
     if (!level) {
       console.warn(`[smart-router] LLM 응답 파싱 실패 ("${content}"), 규칙 기반으로 fallback`);
-      return evaluateComplexity(message, context, remoteThreshold);
+      const fallbackDecision = evaluateComplexity(message, context, remoteThreshold);
+      emitTrace({
+        mode: "llm",
+        apiType,
+        model,
+        baseUrl,
+        endpoint: url,
+        promptChars,
+        usage,
+        httpStatus: response.status,
+        finalTarget: fallbackDecision.target,
+        classifierLevel: fallbackDecision.level,
+        classifierReason: fallbackDecision.reason,
+        fallbackToRule: true,
+        error: `invalid level: ${content}`,
+      });
+      return fallbackDecision;
     }
 
     const reason = parsed.reason ?? level;
@@ -489,20 +626,59 @@ export async function evaluateComplexityWithLLM(
 
     const target = routeTargetFromLevel(level, remoteThreshold);
 
-    return {
+    const decision = {
       level,
       score: ruleDecision.score, // 참고용 규칙 점수 유지
       target,
       reason: `[LLM] ${reason}`,
     };
+
+    emitTrace({
+      mode: "llm",
+      apiType,
+      model,
+      baseUrl,
+      endpoint: url,
+      promptChars,
+      usage,
+      httpStatus: response.status,
+      classifierLevel: level,
+      classifierReason: reason,
+      finalTarget: target,
+      fallbackToRule: false,
+    });
+
+    return decision;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    const fallbackDecision = evaluateComplexity(message, context, remoteThreshold);
     if (errMsg.includes("abort")) {
       console.warn(`[smart-router] LLM 평가 타임아웃 (${timeoutMs}ms), 규칙 기반으로 fallback`);
     } else {
       console.warn(`[smart-router] LLM 평가 에러: ${errMsg}, 규칙 기반으로 fallback`);
     }
-    return evaluateComplexity(message, context, remoteThreshold);
+    emitTrace({
+      mode: "llm",
+      apiType,
+      model,
+      baseUrl,
+      endpoint: apiType === "ollama"
+        ? `${baseUrl}/api/chat`
+        : apiType === "openai-responses"
+          ? `${baseUrl.replace(/\/+$/, "")}/responses`
+          : `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
+      promptChars: LLM_CLASSIFIER_PROMPT.length + message.length,
+      finalTarget: fallbackDecision.target,
+      classifierLevel: fallbackDecision.level,
+      classifierReason: fallbackDecision.reason,
+      fallbackToRule: true,
+      error: errMsg,
+    });
+    return fallbackDecision;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
 

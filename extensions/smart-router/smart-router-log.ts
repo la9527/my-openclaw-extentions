@@ -3,6 +3,7 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Api, AssistantMessage, Model } from "@mariozechner/pi-ai";
+import type { EvaluationTrace } from "./complexity.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -34,6 +35,10 @@ export interface SmartRouterRouteInfo {
   thinkingLevel?: string;
   workspaceDir?: string;
   agentDir?: string;
+  sessionId?: string;
+  turnIndex?: number;
+  rootTurnId?: string;
+  parentRequestId?: string;
   context: unknown;
   extraParams?: Record<string, unknown>;
   streamOptions?: unknown;
@@ -49,7 +54,7 @@ export interface SmartRouterResponseLog {
 
 type SmartRouterLogEvent = JsonObject & {
   ts: string;
-  event: "route" | "payload" | "response" | "response_error" | "stream_failure";
+  event: "evaluation" | "route" | "payload" | "response" | "response_error" | "stream_failure";
   requestId: string;
 };
 
@@ -469,13 +474,26 @@ function enqueueWrite(filePath: string, line: string): Promise<void> {
 }
 
 export class SmartRouterRequestLogger {
-  readonly requestId = crypto.randomUUID();
   private readonly startedAt = Date.now();
 
   constructor(
     private readonly logger: SmartRouterLogger,
+    readonly requestId: string,
     private readonly info: SmartRouterRouteInfo,
   ) {}
+
+  logEvaluation(trace: EvaluationTrace): void {
+    this.logger.write({
+      ...this.baseEvent("evaluation"),
+      evaluationId: crypto.randomUUID(),
+      evaluation: trace,
+      evaluationApiType: trace.apiType,
+      evaluationDurationMs: trace.durationMs,
+      evaluationTarget: trace.finalTarget,
+      evaluationFallbackToRule: trace.fallbackToRule,
+      evaluationUsage: trace.usage,
+    });
+  }
 
   logRoute(): void {
     this.logger.write({
@@ -557,6 +575,10 @@ export class SmartRouterRequestLogger {
       thinkingLevel: this.info.thinkingLevel,
       workspaceDir: this.info.workspaceDir,
       agentDir: this.info.agentDir,
+      sessionId: this.info.sessionId,
+      turnIndex: this.info.turnIndex,
+      rootTurnId: this.info.rootTurnId,
+      parentRequestId: this.info.parentRequestId,
     };
   }
 }
@@ -568,6 +590,7 @@ export class SmartRouterLogger {
   readonly maxTextChars: number;
   readonly retentionDays: number;
   private lastPrunedDate?: string;
+  private readonly lastRequestIdByTurn = new Map<string, string>();
 
   constructor(config: SmartRouterLoggerConfig = {}) {
     this.enabled = parseBoolean(process.env.OPENCLAW_SMART_ROUTER_LOG, config.enabled ?? true);
@@ -590,7 +613,15 @@ export class SmartRouterLogger {
   }
 
   createRequest(info: SmartRouterRouteInfo): SmartRouterRequestLogger {
-    return new SmartRouterRequestLogger(this, info);
+    const requestId = crypto.randomUUID();
+    const parentRequestId = info.rootTurnId ? this.lastRequestIdByTurn.get(info.rootTurnId) : undefined;
+    if (info.rootTurnId) {
+      this.lastRequestIdByTurn.set(info.rootTurnId, requestId);
+    }
+    return new SmartRouterRequestLogger(this, requestId, {
+      ...info,
+      parentRequestId,
+    });
   }
 
   async flush(): Promise<void> {

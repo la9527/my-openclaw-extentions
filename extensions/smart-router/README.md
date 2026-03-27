@@ -193,14 +193,25 @@ tail -f /tmp/openclaw-gateway.log | grep smart-router
 
 한 요청에서 기본적으로 남는 이벤트:
 
-1. `route`: 복잡도 판정, 선택 tier/model, OpenClaw context 요약
-2. `payload`: 실제 provider로 전송된 payload 요약
-3. `response` 또는 `response_error`: 응답 usage, stopReason, content type, tool call 요약
+1. `evaluation`: rule 또는 llm 평가 결과, 평가 지연시간, LLM 분류 usage, fallback 여부
+2. `route`: 복잡도 판정, 선택 tier/model, OpenClaw context 요약
+3. `payload`: 실제 provider로 전송된 payload 요약
+4. `response` 또는 `response_error`: 응답 usage, stopReason, content type, tool call 요약
+
+또한 아래 상관관계 필드가 함께 남습니다.
+
+- `sessionId`
+- `turnIndex`
+- `rootTurnId`
+- `parentRequestId`
+
+이 조합으로 같은 사용자 턴에서 tool 호출이나 후속 재요청이 여러 request로 분리되는 경우를 다시 묶어볼 수 있습니다.
 
 예시:
 
 ```json
-{"event":"route","requestedModelId":"auto","routeTier":"mini","evaluationMode":"llm"}
+{"event":"evaluation","requestId":"...","evaluationTarget":"mini","evaluationFallbackToRule":false}
+{"event":"route","requestedModelId":"auto","routeTier":"mini","evaluationMode":"llm","rootTurnId":"session-1:turn:3"}
 {"event":"payload","routeApi":"openai-responses","payloadSummary":{"rootKeys":["input","model","reasoning","tools"]}}
 {"event":"response","usage":{"input":123,"output":45,"totalTokens":168},"responseSummary":{"contentTypes":["text"],"toolCallCount":0}}
 ```
