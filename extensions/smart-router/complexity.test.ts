@@ -11,16 +11,16 @@ import {
 } from "./complexity.js";
 
 describe("routeTargetFromLevel", () => {
-  it("기본 threshold=moderate 에서 local/mini/full 매핑을 적용한다", () => {
+  it("기본 threshold=moderate 에서 local/nano/mini/full 매핑을 적용한다", () => {
     expect(routeTargetFromLevel("simple")).toBe("local");
-    expect(routeTargetFromLevel("moderate")).toBe("mini");
-    expect(routeTargetFromLevel("complex")).toBe("full");
+    expect(routeTargetFromLevel("moderate")).toBe("nano");
+    expect(routeTargetFromLevel("complex")).toBe("mini");
     expect(routeTargetFromLevel("advanced")).toBe("full");
   });
 
   it("threshold=complex 면 moderate 는 local 유지", () => {
     expect(routeTargetFromLevel("moderate", "complex")).toBe("local");
-    expect(routeTargetFromLevel("complex", "complex")).toBe("full");
+    expect(routeTargetFromLevel("complex", "complex")).toBe("mini");
   });
 
   it("threshold=advanced 면 advanced 만 full 로 보낸다", () => {
@@ -36,13 +36,13 @@ describe("evaluateComplexity", () => {
     expect(decision.target).toBe("local");
   });
 
-  it("중간 길이 설명 요청은 기본적으로 mini tier 로 간다", () => {
+  it("중간 길이 설명 요청은 기본적으로 nano tier 로 간다", () => {
     const decision = evaluateComplexity("파이썬에 대해 단계별로 간단히 설명해줘".padEnd(260, " "));
     expect(decision.level).toBe("moderate");
-    expect(decision.target).toBe("mini");
+    expect(decision.target).toBe("nano");
   });
 
-  it("코드 리팩토링 요청은 full tier 로 간다", () => {
+  it("코드 리팩토링 요청은 mini tier 로 간다", () => {
     const message = [
       "이 코드를 리팩토링하고 구조를 개선해줘.",
       "```ts",
@@ -56,7 +56,7 @@ describe("evaluateComplexity", () => {
 
     const decision = evaluateComplexity(message);
     expect(decision.level).toBe("complex");
-    expect(decision.target).toBe("full");
+    expect(decision.target).toBe("mini");
   });
 
   it("긴 코드와 도구 맥락이 있으면 full tier 로 간다", () => {
@@ -110,7 +110,7 @@ describe("evaluateComplexityWithLLM", () => {
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
-  it("OpenAI Responses 응답을 파싱해 full tier 를 반환한다", async () => {
+  it("OpenAI Responses 응답을 파싱해 mini tier 를 반환한다", async () => {
     const traces: EvaluationTrace[] = [];
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
@@ -142,18 +142,18 @@ describe("evaluateComplexityWithLLM", () => {
     );
 
     expect(decision.level).toBe("complex");
-    expect(decision.target).toBe("full");
+    expect(decision.target).toBe("mini");
     expect(decision.reason).toContain("[LLM]");
     expect(traces[0]).toMatchObject({
       mode: "llm",
       apiType: "openai-responses",
-      finalTarget: "full",
+      finalTarget: "mini",
       fallbackToRule: false,
       usage: { input: 31, output: 9, cacheRead: 7, totalTokens: 40 },
     });
   });
 
-  it("threshold=moderate 에서 moderate 분류는 mini tier 로 간다", async () => {
+  it("threshold=moderate 에서 moderate 분류는 nano tier 로 간다", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -178,7 +178,7 @@ describe("evaluateComplexityWithLLM", () => {
       "openai-responses",
     );
 
-    expect(decision.target).toBe("mini");
+    expect(decision.target).toBe("nano");
   });
 
   it("threshold=complex 에서 moderate 분류는 local 유지", async () => {

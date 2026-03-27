@@ -232,9 +232,9 @@ export function routeTargetFromLevel(
     case "simple":
       return "local";
     case "moderate":
-      return "mini";
+      return "nano";
     case "complex":
-      return "full";
+      return "mini";
     case "advanced":
       return "full";
   }

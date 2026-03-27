@@ -88,6 +88,19 @@ describe("smart-router stream label injection", () => {
     expect(result.retainedToolCount).toBe(2);
   });
 
+  it("prunes tools for nano route in minimal mode", () => {
+    const result = __testing.applyToolExposurePolicy(
+      { tools: [{ name: "read" }, { name: "write" }] },
+      "nano",
+      "요약만 해줘",
+      { hasToolUse: false },
+      "minimal",
+    );
+
+    expect(result.applied).toBe(true);
+    expect(result.retainedToolCount).toBe(0);
+  });
+
   it("escalates local routing when p95 latency is too high", () => {
     const reason = __testing.shouldEscalateLocalRoute(
       { sampleCount: 4, errorCount: 0, errorRate: 0, p95Ms: 16000 },

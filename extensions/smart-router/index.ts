@@ -7,8 +7,10 @@
  *   1. "smart-router" 프로바이더를 등록하고 "auto" 모델을 제공한다.
  *   2. resolveDynamicModel 훅에서 로컬 Ollama 모델 정의를 반환한다.
  *   3. wrapStreamFn 훅에서 메시지 복잡도를 분석하여:
- *      - 단순/보통 → 로컬 Ollama로 그대로 전달
- *      - 복잡/고급 → 모델 파라미터를 외부 LLM으로 변경하여 전달
+ *      - 단순 → 로컬 LLM
+ *      - 보통 → nano
+ *      - 복잡 → mini
+ *      - 고급 → full
  *   4. /route, /local, /remote 슬래시 명령을 등록한다.
  */
 
@@ -541,7 +543,7 @@ function applyToolExposurePolicy(
   const shouldPrune =
     !explicitToolIntent &&
     ((mode === "conservative" && routeTier === "local") ||
-      (mode === "minimal" && (routeTier === "local" || routeTier === "mini")));
+      (mode === "minimal" && (routeTier === "local" || routeTier === "nano")));
 
   if (!shouldPrune) {
     return {
@@ -895,13 +897,13 @@ export default definePluginEntry({
           if (routeAdjustmentReason) {
             adjustedDecision = {
               ...adjustedDecision,
-              target: "mini",
+              target: "nano",
               reason: `${adjustedDecision.reason} | [health] ${routeAdjustmentReason}`,
             };
             if (evaluationTrace) {
               evaluationTrace = {
                 ...evaluationTrace,
-                finalTarget: "mini",
+                finalTarget: "nano",
               };
             }
           }
