@@ -1,46 +1,33 @@
 import { describe, expect, it } from "vitest";
 import smartRouter, { __testing } from "./index.js";
 
-describe("smart-router stream label injection", () => {
-  it("prepends the current label and strips stale labels from response text", () => {
-    const label = __testing.buildModelLabel(
+describe("smart-router route metadata", () => {
+  it("attaches structured route metadata and aliases the visible model to the route tier", () => {
+    const message = __testing.attachRouteMeta(
       {
-        tier: "mini",
-        provider: "openai",
+        role: "assistant",
         model: "gpt-5.4-mini-2026-03-17",
-        baseUrl: "https://api.openai.com/v1",
-        api: "openai-responses",
-        contextWindow: 128000,
-        maxTokens: 16384,
-        label: "mini:gpt-5.4-mini-2026-03-17",
+        content: [{ type: "text", text: "응답 본문" }],
       },
-      "complex",
-    );
-
-    expect(
-      __testing.prependModelLabel(
-        "[smart-router nano/moderate] gpt-5.4-nano-2026-03-17\n\n기존 라벨이 섞인 응답",
-        label,
-      ),
-    ).toBe(`${label}기존 라벨이 섞인 응답`);
-  });
-
-  it("strips compact labels and leading whitespace before prepending", () => {
-    const label = __testing.buildModelLabel(
       {
-        tier: "local",
-        provider: "lmstudio",
-        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-        baseUrl: "http://127.0.0.1:1235/v1",
-        api: "openai",
-        contextWindow: 128000,
-        maxTokens: 16384,
-        label: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        source: "smart-router",
+        mode: "auto",
+        tier: "mini",
+        level: "complex",
       },
-      "simple",
     );
 
-    expect(__testing.prependModelLabel("  <sub>[full/direct]</sub>\n\n응답", label)).toBe(`${label}응답`);
+    expect(message.content).toEqual([{ type: "text", text: "응답 본문" }]);
+    expect((message as { model?: string }).model).toBe("mini");
+    expect(message).toMatchObject({
+      smartRouterRoute: {
+        source: "smart-router",
+        mode: "auto",
+        tier: "mini",
+        level: "complex",
+        resolvedModel: "gpt-5.4-mini-2026-03-17",
+      },
+    });
   });
 
   it("registers with a wrapStreamFn hook", () => {

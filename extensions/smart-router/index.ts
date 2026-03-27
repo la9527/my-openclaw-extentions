@@ -102,6 +102,14 @@ interface RouteModelConfig {
   label: string;
 }
 
+type SmartRouterRouteMeta = {
+  source: typeof PROVIDER_ID;
+  mode: "auto" | "direct";
+  tier: RouteTarget;
+  level?: ComplexityLevel;
+  resolvedModel?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -217,14 +225,6 @@ function resolveRouteModel(config: ResolvedConfig, target: RouteTarget): RouteMo
   };
 }
 
-function buildModelLabel(route: RouteModelConfig, level: ComplexityLevel): string {
-  return `<sub>[${route.tier}/${level}]</sub>\n\n`;
-}
-
-function buildDirectModelLabel(route: RouteModelConfig): string {
-  return `<sub>[${route.tier}]</sub>\n\n`;
-}
-
 function parseSmartRouterModelId(modelId: unknown): SmartRouterModelId | undefined {
   switch (String(modelId ?? "").trim()) {
     case "auto":
@@ -238,120 +238,54 @@ function parseSmartRouterModelId(modelId: unknown): SmartRouterModelId | undefin
   }
 }
 
-function stripLeadingModelLabels(text: string): string {
-  let normalized = text.replace(/^\s+/u, "");
+function attachRouteMeta(message: AssistantMessage, routeMeta: SmartRouterRouteMeta): AssistantMessage {
+  const messageRecord = message as unknown as Record<string, unknown>;
+  const resolvedModel = typeof messageRecord.model === "string"
+    ? messageRecord.model
+    : undefined;
 
-  while (normalized.length > 0) {
-    const next = normalized
-      .replace(/^(?:<sub>\s*)?\[smart-router [^\]\n]+\][^\n]*?(?:<\/sub>)?\s*\n+/iu, "")
-      .replace(/^(?:<sub>\s*)?\[(?:local|nano|mini|full)(?:\/(?:simple|moderate|complex|advanced|direct))?\](?:<\/sub>)?\s*\n+/iu, "")
-      .replace(/^\s+/u, "");
-
-    if (next === normalized) {
-      break;
-    }
-
-    normalized = next;
-  }
-
-  return normalized;
+  return {
+    ...message,
+    model: routeMeta.tier,
+    smartRouterRoute: {
+      ...routeMeta,
+      resolvedModel: routeMeta.resolvedModel ?? resolvedModel,
+    },
+  } as AssistantMessage;
 }
 
-function prependModelLabel(text: string, label: string): string {
-  const normalized = stripLeadingModelLabels(text);
-  if (normalized.startsWith(label)) {
-    return normalized;
-  }
-
-  return `${label}${normalized}`;
-}
-
-function ensureLabeledMessage(message: AssistantMessage, label: string): AssistantMessage {
-  const content = [...message.content];
-  const firstTextIndex = content.findIndex((item) => item.type === "text");
-
-  if (firstTextIndex === -1) {
-    content.unshift({ type: "text", text: label });
-    return { ...message, content };
-  }
-
-  const firstText = content[firstTextIndex];
-  if (firstText.type !== "text" || firstText.text.startsWith(label)) {
-    return message;
-  }
-
-  content[firstTextIndex] = {
-    ...firstText,
-    text: prependModelLabel(firstText.text, label),
-  };
-  return { ...message, content };
-}
-
-function wrapStreamWithModelLabel(
+function wrapStreamWithRouteMeta(
   stream: AssistantStream,
-  label?: string,
+  routeMeta?: SmartRouterRouteMeta,
   requestLogger?: SmartRouterRequestLogger,
 ): AssistantStream {
-  let injected = false;
   const wrapped = createAssistantMessageEventStream();
   const eventCounts: Record<string, number> = {};
   let terminalEventSeen = false;
 
   const patchEvent = (event: AssistantMessageEvent): AssistantMessageEvent => {
-    if (!label) {
+    if (!routeMeta) {
       return event;
     }
 
-    if (event.type === "text_delta") {
-      if (!injected) {
-        injected = true;
-        return {
-          ...event,
-          delta: prependModelLabel(event.delta, label),
-          partial: ensureLabeledMessage(event.partial, label),
-        };
-      }
-
+    if ("partial" in event) {
       return {
         ...event,
-        partial: ensureLabeledMessage(event.partial, label),
-      };
-    }
-
-    if (event.type === "text_end") {
-      if (!injected) {
-        injected = true;
-        return {
-          ...event,
-          content: prependModelLabel(event.content, label),
-          partial: ensureLabeledMessage(event.partial, label),
-        };
-      }
-
-      return {
-        ...event,
-        partial: ensureLabeledMessage(event.partial, label),
+        partial: attachRouteMeta(event.partial, routeMeta),
       };
     }
 
     if (event.type === "done") {
       return {
         ...event,
-        message: ensureLabeledMessage(event.message, label),
+        message: attachRouteMeta(event.message, routeMeta),
       };
     }
 
     if (event.type === "error") {
       return {
         ...event,
-        error: ensureLabeledMessage(event.error, label),
-      };
-    }
-
-    if ("partial" in event && injected) {
-      return {
-        ...event,
-        partial: ensureLabeledMessage(event.partial, label),
+        error: attachRouteMeta(event.error, routeMeta),
       };
     }
 
@@ -633,11 +567,8 @@ function buildRuleEvaluationTrace(
 }
 
 export const __testing = {
-  buildModelLabel,
-  buildDirectModelLabel,
-  stripLeadingModelLabels,
-  prependModelLabel,
-  wrapStreamWithModelLabel,
+  attachRouteMeta,
+  wrapStreamWithRouteMeta,
   parseSmartRouterModelId,
   hasExplicitToolIntent,
   applyToolExposurePolicy,
@@ -840,7 +771,17 @@ export default definePluginEntry({
               throw error;
             }
 
-            return wrapStreamWithModelLabel(stream, undefined, requestLogger);
+            return wrapStreamWithRouteMeta(
+              stream,
+              pluginConfig.showModelLabel
+                ? {
+                    source: PROVIDER_ID,
+                    mode: "direct",
+                    tier: routed.tier,
+                  }
+                : undefined,
+              requestLogger,
+            );
           }
 
           // 1. 메시지 추출
@@ -984,9 +925,16 @@ export default definePluginEntry({
             throw error;
           }
 
-          return wrapStreamWithModelLabel(
+          return wrapStreamWithRouteMeta(
             stream,
-            pluginConfig.showModelLabel ? buildModelLabel(routed, adjustedDecision.level) : undefined,
+            pluginConfig.showModelLabel
+              ? {
+                  source: PROVIDER_ID,
+                  mode: "auto",
+                  tier: routed.tier,
+                  level: adjustedDecision.level,
+                }
+              : undefined,
             requestLogger,
           );
         };
