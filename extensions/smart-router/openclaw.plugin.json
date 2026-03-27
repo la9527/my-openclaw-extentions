@@ -92,6 +92,26 @@
       "showModelLabel": {
         "type": "boolean",
         "description": "응답 첫 줄에 선택된 모델/tier 라벨을 표시할지 여부. 기본: true"
+      },
+      "logEnabled": {
+        "type": "boolean",
+        "description": "smart-router 실행 로그를 JSONL로 저장할지 여부. 기본: true"
+      },
+      "logFilePath": {
+        "type": "string",
+        "description": "실행 로그 JSONL 파일 경로 override. 기본: ~/.openclaw/logs/smart-router.jsonl"
+      },
+      "logPayloadBody": {
+        "type": "boolean",
+        "description": "provider payload 본문까지 로그에 남길지 여부. 기본: false"
+      },
+      "logMaxTextChars": {
+        "type": "number",
+        "description": "응답 미리보기나 텍스트 필드 로그 시 최대 문자 수. 기본: 600"
+      },
+      "logRetentionDays": {
+        "type": "number",
+        "description": "날짜별 실행 로그 파일을 몇 일치 보관할지 설정. 기본: 10, 0 이하면 무제한 보관"
       }
     }
   }

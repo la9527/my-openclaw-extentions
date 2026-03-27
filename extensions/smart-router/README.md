@@ -140,6 +140,11 @@ localApi = openai
 | `evaluationLlmModel` | 없음 | `llm` 평가용 모델 override |
 | `evaluationTimeoutMs` | `15000` | `llm` 평가 타임아웃 |
 | `showModelLabel` | `true` | 응답 첫 줄 라벨 표시 여부 |
+| `logEnabled` | `true` | smart-router 실행 로그 JSONL 기록 여부 |
+| `logFilePath` | `~/.openclaw/logs/smart-router.jsonl` | 실행 로그 파일 경로 override |
+| `logPayloadBody` | `false` | provider payload 본문까지 기록할지 여부 |
+| `logMaxTextChars` | `600` | 응답 미리보기와 텍스트 필드 최대 기록 길이 |
+| `logRetentionDays` | `10` | 날짜별 로그 파일 보관 일수 |
 
 ## threshold 의미
 
@@ -169,6 +174,44 @@ localApi = openai
 
 ```bash
 tail -f /tmp/openclaw-gateway.log | grep smart-router
+```
+
+## 실행 로그 JSONL
+
+콘솔 라우팅 로그와 별도로, smart-router는 요청 단위 실행 로그를 JSONL로 남길 수 있습니다.
+
+기본 경로:
+
+```text
+~/.openclaw/logs/smart-router-YYYY-MM-DD.jsonl
+```
+
+- 로그 파일은 일 단위로 분리됩니다.
+- 기본 보관 기간은 최근 10일입니다.
+- `logRetentionDays` 또는 `OPENCLAW_SMART_ROUTER_LOG_RETENTION_DAYS` 로 변경할 수 있습니다.
+- `0` 이하로 주면 보관 정리를 하지 않습니다.
+
+한 요청에서 기본적으로 남는 이벤트:
+
+1. `route`: 복잡도 판정, 선택 tier/model, OpenClaw context 요약
+2. `payload`: 실제 provider로 전송된 payload 요약
+3. `response` 또는 `response_error`: 응답 usage, stopReason, content type, tool call 요약
+
+예시:
+
+```json
+{"event":"route","requestedModelId":"auto","routeTier":"mini","evaluationMode":"llm"}
+{"event":"payload","routeApi":"openai-responses","payloadSummary":{"rootKeys":["input","model","reasoning","tools"]}}
+{"event":"response","usage":{"input":123,"output":45,"totalTokens":168},"responseSummary":{"contentTypes":["text"],"toolCallCount":0}}
+```
+
+원하면 환경변수로도 제어할 수 있습니다.
+
+```bash
+export OPENCLAW_SMART_ROUTER_LOG=1
+export OPENCLAW_SMART_ROUTER_LOG_FILE="$HOME/.openclaw/logs/smart-router.jsonl"
+export OPENCLAW_SMART_ROUTER_LOG_PAYLOAD=0
+export OPENCLAW_SMART_ROUTER_LOG_RETENTION_DAYS=10
 ```
 
 ## 검증 예시

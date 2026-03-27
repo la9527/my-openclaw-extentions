@@ -33,6 +33,10 @@ import {
   type AssistantMessage,
   type AssistantMessageEvent,
 } from "@mariozechner/pi-ai";
+import {
+  createSmartRouterLogger,
+  type SmartRouterRequestLogger,
+} from "./smart-router-log.js";
 
 /** 평가 모드 */
 export type EvaluationMode = "rule" | "llm";
@@ -65,6 +69,10 @@ const DEFAULTS = {
   evaluationLlmTarget: "nano" as Exclude<RouteTarget, "local">,
   evaluationTimeoutMs: 15_000,
   showModelLabel: true,
+  logEnabled: true,
+  logPayloadBody: false,
+  logMaxTextChars: 600,
+  logRetentionDays: 10,
 } as const;
 
 type ResolvedConfig = ReturnType<typeof resolveConfig>;
@@ -134,6 +142,21 @@ function resolveConfig(pluginConfig?: Record<string, unknown>) {
         : pluginConfig?.showModelLabel === undefined
           ? DEFAULTS.showModelLabel
           : String(pluginConfig.showModelLabel).toLowerCase() === "true",
+    logEnabled:
+      typeof pluginConfig?.logEnabled === "boolean"
+        ? pluginConfig.logEnabled
+        : pluginConfig?.logEnabled === undefined
+          ? DEFAULTS.logEnabled
+          : String(pluginConfig.logEnabled).toLowerCase() === "true",
+    logFilePath: pluginConfig?.logFilePath ? String(pluginConfig.logFilePath) : undefined,
+    logPayloadBody:
+      typeof pluginConfig?.logPayloadBody === "boolean"
+        ? pluginConfig.logPayloadBody
+        : pluginConfig?.logPayloadBody === undefined
+          ? DEFAULTS.logPayloadBody
+          : String(pluginConfig.logPayloadBody).toLowerCase() === "true",
+    logMaxTextChars: Number(pluginConfig?.logMaxTextChars ?? DEFAULTS.logMaxTextChars),
+    logRetentionDays: Number(pluginConfig?.logRetentionDays ?? DEFAULTS.logRetentionDays),
   };
 }
 
@@ -235,11 +258,21 @@ function ensureLabeledMessage(message: AssistantMessage, label: string): Assista
   return { ...message, content };
 }
 
-function wrapStreamWithModelLabel(stream: AssistantStream, label: string): AssistantStream {
+function wrapStreamWithModelLabel(
+  stream: AssistantStream,
+  label?: string,
+  requestLogger?: SmartRouterRequestLogger,
+): AssistantStream {
   let injected = false;
   const wrapped = createAssistantMessageEventStream();
+  const eventCounts: Record<string, number> = {};
+  let terminalEventSeen = false;
 
   const patchEvent = (event: AssistantMessageEvent): AssistantMessageEvent => {
+    if (!label) {
+      return event;
+    }
+
     if (event.type === "text_delta") {
       if (!injected) {
         injected = true;
@@ -296,12 +329,41 @@ function wrapStreamWithModelLabel(stream: AssistantStream, label: string): Assis
     return event;
   };
 
+  const recordEvent = (event: AssistantMessageEvent) => {
+    eventCounts[event.type] = (eventCounts[event.type] ?? 0) + 1;
+
+    if (terminalEventSeen || !requestLogger) {
+      return;
+    }
+
+    if (event.type === "done") {
+      terminalEventSeen = true;
+      requestLogger.logResponse({
+        kind: "response",
+        message: event.message,
+        eventCounts: { ...eventCounts },
+      });
+      return;
+    }
+
+    if (event.type === "error") {
+      terminalEventSeen = true;
+      requestLogger.logResponse({
+        kind: "response_error",
+        message: event.error,
+        eventCounts: { ...eventCounts },
+      });
+    }
+  };
+
   void (async () => {
     try {
       for await (const event of stream) {
+        recordEvent(event);
         wrapped.push(patchEvent(event));
       }
     } catch (error) {
+      requestLogger?.logStreamFailure(error, { ...eventCounts });
       throw error;
     }
   })();
@@ -398,6 +460,13 @@ export default definePluginEntry({
   register(api: OpenClawPluginApi) {
     // api.pluginConfig = plugins.entries["smart-router"].config 의 검증된 값
     const pluginConfig = resolveConfig(api.pluginConfig);
+    const executionLogger = createSmartRouterLogger({
+      enabled: pluginConfig.logEnabled,
+      filePath: pluginConfig.logFilePath,
+      includePayloadBody: pluginConfig.logPayloadBody,
+      maxTextChars: pluginConfig.logMaxTextChars,
+      retentionDays: pluginConfig.logRetentionDays,
+    });
 
     api.registerProvider({
       id: PROVIDER_ID,
@@ -527,6 +596,24 @@ export default definePluginEntry({
           if (requestedModelId && requestedModelId !== "auto") {
             const routed = resolveRouteModel(pluginConfig, requestedModelId);
             console.log(`[smart-router] 🎯 direct selection → ${routed.label}`);
+            const requestLogger = executionLogger.createRequest({
+              requestedModelId,
+              routeMode: "direct",
+              evaluationMode: "direct",
+              threshold: pluginConfig.threshold,
+              routeTier: routed.tier,
+              routeProvider: routed.provider,
+              routeModel: routed.model,
+              routeApi: routed.api,
+              routeLabel: routed.label,
+              thinkingLevel: ctx.thinkingLevel,
+              workspaceDir: ctx.workspaceDir,
+              agentDir: ctx.agentDir,
+              context,
+              extraParams: ctx.extraParams,
+              streamOptions: options,
+            });
+            requestLogger.logRoute();
 
             const directModel = {
               ...(model as Record<string, unknown>),
@@ -538,17 +625,23 @@ export default definePluginEntry({
               maxTokens: routed.maxTokens,
             };
 
-            const stream = (await baseStreamFn(
-              directModel as Parameters<typeof baseStreamFn>[0],
-              context as Parameters<typeof baseStreamFn>[1],
-              options as Parameters<typeof baseStreamFn>[2],
-            )) as AssistantStream;
-
-            if (!pluginConfig.showModelLabel) {
-              return stream;
+            let stream: AssistantStream;
+            try {
+              stream = (await baseStreamFn(
+                directModel as Parameters<typeof baseStreamFn>[0],
+                context as Parameters<typeof baseStreamFn>[1],
+                requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
+              )) as AssistantStream;
+            } catch (error) {
+              requestLogger.logStreamFailure(error, {});
+              throw error;
             }
 
-            return wrapStreamWithModelLabel(stream, buildDirectModelLabel(routed));
+            return wrapStreamWithModelLabel(
+              stream,
+              pluginConfig.showModelLabel ? buildDirectModelLabel(routed) : undefined,
+              requestLogger,
+            );
           }
 
           // 1. 메시지 추출
@@ -582,6 +675,30 @@ export default definePluginEntry({
               : evaluateComplexity(lastMessage, evalContext, pluginConfig.threshold);
 
           const routed = resolveRouteModel(pluginConfig, decision.target);
+          const requestLogger = executionLogger.createRequest({
+            requestedModelId: requestedModelId ?? String((model as Record<string, unknown>)?.id ?? "unknown"),
+            routeMode: "auto",
+            evaluationMode: pluginConfig.evaluationMode,
+            threshold: pluginConfig.threshold,
+            routeTier: routed.tier,
+            routeProvider: routed.provider,
+            routeModel: routed.model,
+            routeApi: routed.api,
+            routeLabel: routed.label,
+            thinkingLevel: ctx.thinkingLevel,
+            workspaceDir: ctx.workspaceDir,
+            agentDir: ctx.agentDir,
+            context,
+            extraParams: ctx.extraParams,
+            streamOptions: options,
+            decision: {
+              level: decision.level,
+              reason: decision.reason,
+              scoreTotal: decision.score.total,
+              scoreBreakdown: decision.score.breakdown,
+            },
+          });
+          requestLogger.logRoute();
 
           // 3. 라우팅 결정 로그
           const logPrefix = `[smart-router]`;
@@ -601,17 +718,23 @@ export default definePluginEntry({
             maxTokens: routed.maxTokens,
           };
 
-          const stream = (await baseStreamFn(
-            routedModel as Parameters<typeof baseStreamFn>[0],
-            context as Parameters<typeof baseStreamFn>[1],
-            options as Parameters<typeof baseStreamFn>[2],
-          )) as AssistantStream;
-
-          if (!pluginConfig.showModelLabel) {
-            return stream;
+          let stream: AssistantStream;
+          try {
+            stream = (await baseStreamFn(
+              routedModel as Parameters<typeof baseStreamFn>[0],
+              context as Parameters<typeof baseStreamFn>[1],
+              requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
+            )) as AssistantStream;
+          } catch (error) {
+            requestLogger.logStreamFailure(error, {});
+            throw error;
           }
 
-          return wrapStreamWithModelLabel(stream, buildModelLabel(routed, decision.level));
+          return wrapStreamWithModelLabel(
+            stream,
+            pluginConfig.showModelLabel ? buildModelLabel(routed, decision.level) : undefined,
+            requestLogger,
+          );
         };
       },
 
