@@ -144,7 +144,13 @@ localApi = openai
 | `logFilePath` | `~/.openclaw/logs/smart-router.jsonl` | 실행 로그 파일 경로 override |
 | `logPayloadBody` | `false` | provider payload 본문까지 기록할지 여부 |
 | `logMaxTextChars` | `600` | 응답 미리보기와 텍스트 필드 최대 기록 길이 |
+| `logPreviewChars` | `240` | `firstTextPreview` 최대 길이 |
 | `logRetentionDays` | `10` | 날짜별 로그 파일 보관 일수 |
+| `toolExposureMode` | `conservative` | tool schema 노출 정책 |
+| `latencyAwareRouting` | `true` | local 상태가 나쁘면 mini로 승격할지 여부 |
+| `localLatencyP95ThresholdMs` | `12000` | local p95 지연시간 기준 |
+| `localErrorRateThreshold` | `0.25` | local 오류율 기준 |
+| `localHealthMinSamples` | `3` | local 상태 판단 전 최소 샘플 수 |
 
 ## threshold 의미
 
@@ -198,6 +204,18 @@ tail -f /tmp/openclaw-gateway.log | grep smart-router
 3. `payload`: 실제 provider로 전송된 payload 요약
 4. `response` 또는 `response_error`: 응답 usage, stopReason, content type, tool call 요약
 
+P1/P2 후속 반영으로 추가로 볼 수 있는 항목:
+
+- `payloadSummary.promptBreakdown.systemChars`
+- `payloadSummary.promptBreakdown.currentUserChars`
+- `payloadSummary.promptBreakdown.historyChars`
+- `payloadSummary.promptBreakdown.toolResultChars`
+- `payloadSummary.promptBreakdown.toolSchemaChars`
+- `usageSource` (`provider` 또는 `estimate`)
+- `toolExposureApplied`, `originalToolCount`, `retainedToolCount`
+- `routeAdjustmentReason`
+- `localHealth`
+
 또한 아래 상관관계 필드가 함께 남습니다.
 
 - `sessionId`
@@ -211,9 +229,9 @@ tail -f /tmp/openclaw-gateway.log | grep smart-router
 
 ```json
 {"event":"evaluation","requestId":"...","evaluationTarget":"mini","evaluationFallbackToRule":false}
-{"event":"route","requestedModelId":"auto","routeTier":"mini","evaluationMode":"llm","rootTurnId":"session-1:turn:3"}
-{"event":"payload","routeApi":"openai-responses","payloadSummary":{"rootKeys":["input","model","reasoning","tools"]}}
-{"event":"response","usage":{"input":123,"output":45,"totalTokens":168},"responseSummary":{"contentTypes":["text"],"toolCallCount":0}}
+{"event":"route","requestedModelId":"auto","routeTier":"mini","evaluationMode":"llm","rootTurnId":"session-1:turn:3","toolExposureApplied":true}
+{"event":"payload","routeApi":"openai-responses","payloadSummary":{"rootKeys":["input","model","reasoning","tools"],"promptBreakdown":{"systemChars":1234,"currentUserChars":31,"historyChars":400,"toolSchemaChars":2800}}}
+{"event":"response","usage":{"input":123,"output":45,"totalTokens":168},"usageSource":"provider","responseSummary":{"contentTypes":["text"],"toolCallCount":0}}
 ```
 
 원하면 환경변수로도 제어할 수 있습니다.
@@ -222,8 +240,40 @@ tail -f /tmp/openclaw-gateway.log | grep smart-router
 export OPENCLAW_SMART_ROUTER_LOG=1
 export OPENCLAW_SMART_ROUTER_LOG_FILE="$HOME/.openclaw/logs/smart-router.jsonl"
 export OPENCLAW_SMART_ROUTER_LOG_PAYLOAD=0
+export OPENCLAW_SMART_ROUTER_LOG_PREVIEW_LIMIT=240
 export OPENCLAW_SMART_ROUTER_LOG_RETENTION_DAYS=10
 ```
+
+일별 로그를 빠르게 요약하려면 아래 스크립트를 사용하면 됩니다.
+
+```bash
+node extensions/smart-router/summarize-smart-router-log.mjs
+node extensions/smart-router/summarize-smart-router-log.mjs /tmp/smart-router-batch-2026-03-27.jsonl
+```
+
+출력에는 이벤트 수, tier별 사용량, evaluation usage 총량, tool exposure 적용 건수, turn 수 등이 포함됩니다.
+
+## P2 정책
+
+### latency-aware routing
+
+최근 local 응답 기록을 보고 아래 조건이면 `local` 대신 `mini`로 승격합니다.
+
+1. 최근 샘플 수가 `localHealthMinSamples` 이상
+2. `p95 >= localLatencyP95ThresholdMs` 이거나
+3. `errorRate >= localErrorRateThreshold`
+
+이 결과는 `routeAdjustmentReason` 과 `localHealth` 로 로그에 남습니다.
+
+### selective tool exposure
+
+기본값 `toolExposureMode=conservative` 에서는 아래 조건에서 tool 목록을 비웁니다.
+
+1. 최종 route tier 가 `local`
+2. 사용자 메시지에 명시적 tool 의도가 없음
+3. 이전 turn 에 실제 tool 사용 흔적이 없음
+
+즉 단순 인사/요약/짧은 설명 요청은 tool schema 비용을 줄이고, 파일/검색/웹/실행/SQL 같이 명시적 tool 성격이 있는 요청은 그대로 유지합니다.
 
 ## 검증 예시
 
@@ -265,7 +315,7 @@ openclaw models set smart-router/auto
 이 디렉토리에서 실행:
 
 ```bash
-pnpm exec vitest run complexity.test.ts index.test.ts
+pnpm exec vitest run smart-router-log.test.ts complexity.test.ts index.test.ts
 ```
 
 ## 파일 구성
@@ -277,5 +327,6 @@ extensions/smart-router/
 ├── index.ts
 ├── index.test.ts
 ├── openclaw.plugin.json
+├── summarize-smart-router-log.mjs
 └── README.md
 ```

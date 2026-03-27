@@ -204,6 +204,38 @@ describe("evaluateComplexityWithLLM", () => {
     expect(decision.target).toBe("local");
   });
 
+  it("OpenAI chat completions usage 도 trace 에 남긴다", async () => {
+    const traces: EvaluationTrace[] = [];
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"level":"moderate","reason":"일반 질문"}' } }],
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 6,
+            total_tokens: 26,
+            prompt_tokens_details: { cached_tokens: 4 },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await evaluateComplexityWithLLM(
+      "일반 질문이야",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai",
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(traces[0]?.usage).toMatchObject({ input: 20, output: 6, cacheRead: 4, totalTokens: 26 });
+  });
+
   it("Ollama 응답 포맷도 지원한다", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
@@ -226,6 +258,34 @@ describe("evaluateComplexityWithLLM", () => {
 
     expect(decision.target).toBe("full");
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("http://localhost:11434/api/chat");
+  });
+
+  it("Ollama usage 카운트도 trace 에 남긴다", async () => {
+    const traces: EvaluationTrace[] = [];
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          message: { content: '{"level":"simple","reason":"짧은 요청"}' },
+          prompt_eval_count: 18,
+          eval_count: 5,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await evaluateComplexityWithLLM(
+      "짧은 요청",
+      "http://localhost:11434",
+      "qwen3:8b",
+      undefined,
+      "moderate",
+      5000,
+      "ollama",
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(traces[0]?.usage).toMatchObject({ input: 18, output: 5, totalTokens: 23 });
   });
 
   it("잘못된 JSON 응답이면 규칙 기반으로 fallback 한다", async () => {

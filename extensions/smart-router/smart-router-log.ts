@@ -12,7 +12,15 @@ export interface SmartRouterLoggerConfig {
   filePath?: string;
   includePayloadBody?: boolean;
   maxTextChars?: number;
+  previewChars?: number;
   retentionDays?: number;
+}
+
+export interface SmartRouterLocalHealthSnapshot {
+  sampleCount: number;
+  errorCount: number;
+  errorRate: number;
+  p95Ms: number;
 }
 
 export interface SmartRouterRouteDecision {
@@ -39,6 +47,12 @@ export interface SmartRouterRouteInfo {
   turnIndex?: number;
   rootTurnId?: string;
   parentRequestId?: string;
+  toolExposureMode?: string;
+  toolExposureApplied?: boolean;
+  originalToolCount?: number;
+  retainedToolCount?: number;
+  routeAdjustmentReason?: string;
+  localHealth?: SmartRouterLocalHealthSnapshot;
   context: unknown;
   extraParams?: Record<string, unknown>;
   streamOptions?: unknown;
@@ -60,10 +74,19 @@ type SmartRouterLogEvent = JsonObject & {
 
 const DEFAULT_LOG_PATH = path.join(os.homedir(), ".openclaw", "logs", "smart-router.jsonl");
 const DEFAULT_MAX_TEXT_CHARS = 600;
+const DEFAULT_PREVIEW_CHARS = 240;
 const DEFAULT_RETENTION_DAYS = 10;
+const TOKEN_ESTIMATE_DIVISOR = 4;
+const LOCAL_HEALTH_SAMPLE_LIMIT = 30;
 const SENSITIVE_KEY_RE = /(api[-_]?key|authorization|token|secret|password|cookie|session)/i;
 const BASE64_KEY_RE = /(data|blob|base64|image)/i;
 const writeChains = new Map<string, Promise<void>>();
+
+async function waitForPendingWrites(): Promise<void> {
+  while (writeChains.size > 0) {
+    await Promise.all([...writeChains.values()]);
+  }
+}
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") return value;
@@ -111,6 +134,11 @@ function formatError(error: unknown): string | undefined {
 function truncateText(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}... [truncated ${value.length - maxChars} chars]`;
+}
+
+function estimateTokenCount(charCount: number): number {
+  if (!Number.isFinite(charCount) || charCount <= 0) return 0;
+  return Math.ceil(charCount / TOKEN_ESTIMATE_DIVISOR);
 }
 
 function clampPositiveInteger(value: number, fallback: number): number {
@@ -196,6 +224,11 @@ function summarizePrimitive(value: unknown): unknown {
   return String(value);
 }
 
+function estimateSerializedLength(value: unknown): number {
+  const serialized = safeJsonStringify(value);
+  return serialized?.length ?? 0;
+}
+
 function redactValue(value: unknown, keyPath: string[] = [], depth = 0, seen = new WeakSet<object>()): unknown {
   if (typeof value === "string") {
     const key = keyPath.at(-1) ?? "";
@@ -255,25 +288,52 @@ function collectTextLengthFromContentItem(item: unknown): number {
   return 0;
 }
 
+function extractToolCallArgumentChars(item: JsonObject): number {
+  const argumentLike = item.arguments ?? item.input ?? item.args ?? item.parameters;
+  return estimateSerializedLength(argumentLike);
+}
+
 function summarizeMessageLikeArray(messages: unknown[]): JsonObject {
   const roleCounts: Record<string, number> = {};
   const contentTypes = new Set<string>();
   const toolNames = new Set<string>();
+  const toolCallNames = new Set<string>();
+  const toolResultNames = new Set<string>();
+  const roleTextChars: Record<string, number> = {};
+  const messageTextChars: number[] = [];
   let textChars = 0;
+  let toolCallCount = 0;
+  let toolCallArgsChars = 0;
+  let toolResultCount = 0;
+  let toolResultChars = 0;
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (!message || typeof message !== "object") continue;
     const typedMessage = message as JsonObject;
     const role = typeof typedMessage.role === "string" ? typedMessage.role : "unknown";
     roleCounts[role] = (roleCounts[role] ?? 0) + 1;
+    let currentMessageChars = 0;
 
     if (typeof typedMessage.content === "string") {
       contentTypes.add("string");
       textChars += typedMessage.content.length;
+      currentMessageChars += typedMessage.content.length;
+      roleTextChars[role] = (roleTextChars[role] ?? 0) + typedMessage.content.length;
+      if (role === "toolResult") {
+        toolResultCount += 1;
+        toolResultChars += typedMessage.content.length;
+        if (typeof typedMessage.toolName === "string") {
+          toolResultNames.add(typedMessage.toolName);
+        }
+      }
+      messageTextChars[messageIndex] = currentMessageChars;
       continue;
     }
 
-    if (!Array.isArray(typedMessage.content)) continue;
+    if (!Array.isArray(typedMessage.content)) {
+      messageTextChars[messageIndex] = currentMessageChars;
+      continue;
+    }
 
     for (const item of typedMessage.content) {
       if (!item || typeof item !== "object") continue;
@@ -284,9 +344,48 @@ function summarizeMessageLikeArray(messages: unknown[]): JsonObject {
       if (typeof typedItem.name === "string") {
         toolNames.add(typedItem.name);
       }
-      textChars += collectTextLengthFromContentItem(item);
+      const itemTextChars = collectTextLengthFromContentItem(item);
+      textChars += itemTextChars;
+      currentMessageChars += itemTextChars;
+      roleTextChars[role] = (roleTextChars[role] ?? 0) + itemTextChars;
+
+      if (typedItem.type === "toolCall") {
+        toolCallCount += 1;
+        if (typeof typedItem.name === "string") {
+          toolCallNames.add(typedItem.name);
+        }
+        toolCallArgsChars += extractToolCallArgumentChars(typedItem);
+      }
+
+      if (role === "toolResult") {
+        toolResultCount += 1;
+        toolResultChars += itemTextChars;
+        const toolResultName = typeof typedMessage.toolName === "string"
+          ? typedMessage.toolName
+          : typeof typedItem.name === "string"
+            ? typedItem.name
+            : undefined;
+        if (toolResultName) {
+          toolResultNames.add(toolResultName);
+        }
+      }
     }
+
+    messageTextChars[messageIndex] = currentMessageChars;
   }
+
+  const userMessageIndexes = messages.flatMap((message, index) => {
+    if (!message || typeof message !== "object") {
+      return [];
+    }
+
+    const typedMessage = message as JsonObject;
+    return typedMessage.role === "user" ? [index] : [];
+  });
+  const lastUserIndex = userMessageIndexes.at(-1);
+  const currentUserChars = lastUserIndex === undefined ? 0 : (messageTextChars[lastUserIndex] ?? 0);
+  const systemChars = roleTextChars.system ?? 0;
+  const historyChars = Math.max(textChars - systemChars - currentUserChars, 0);
 
   return {
     messageCount: messages.length,
@@ -294,6 +393,20 @@ function summarizeMessageLikeArray(messages: unknown[]): JsonObject {
     contentTypes: [...contentTypes].sort(),
     textChars,
     toolNames: [...toolNames].sort(),
+    toolCallCount,
+    toolCallNames: [...toolCallNames].sort(),
+    toolCallArgsChars,
+    toolResultCount,
+    toolResultNames: [...toolResultNames].sort(),
+    toolResultChars,
+    promptBreakdown: {
+      systemChars,
+      currentUserChars,
+      historyChars,
+      assistantChars: roleTextChars.assistant ?? 0,
+      toolResultChars,
+      totalChars: textChars,
+    },
   };
 }
 
@@ -358,6 +471,10 @@ function summarizePayload(payload: unknown): JsonObject {
       })
       .filter((name): name is string => Boolean(name))
       .sort();
+    summary.toolSchemaChars = typedPayload.tools.reduce(
+      (total, tool) => total + estimateSerializedLength(tool),
+      0,
+    );
   }
 
   for (const key of [
@@ -376,6 +493,23 @@ function summarizePayload(payload: unknown): JsonObject {
     if (key in typedPayload) {
       summary[key] = summarizePrimitive(typedPayload[key]);
     }
+  }
+
+  const promptBreakdown =
+    (summary.messages && typeof summary.messages === "object" && "promptBreakdown" in summary.messages
+      ? (summary.messages as JsonObject).promptBreakdown
+      : undefined) ??
+    (summary.input && typeof summary.input === "object" && "promptBreakdown" in summary.input
+      ? (summary.input as JsonObject).promptBreakdown
+      : undefined);
+
+  if (promptBreakdown && typeof promptBreakdown === "object") {
+    summary.promptBreakdown = {
+      ...(promptBreakdown as JsonObject),
+      toolSchemaChars: typeof summary.toolSchemaChars === "number" ? summary.toolSchemaChars : 0,
+      estimatedPromptChars:
+        Number((promptBreakdown as JsonObject).totalChars ?? 0) + Number(summary.toolSchemaChars ?? 0),
+    };
   }
 
   return summary;
@@ -419,11 +553,12 @@ function summarizeStreamOptions(options: unknown): JsonObject | undefined {
   return Object.keys(summary).length > 0 ? summary : undefined;
 }
 
-function summarizeAssistantMessage(message: AssistantMessage, maxTextChars: number): JsonObject {
+function summarizeAssistantMessage(message: AssistantMessage, maxTextChars: number, previewChars: number): JsonObject {
   const contentTypes = new Set<string>();
   const toolCallNames = new Set<string>();
   let textChars = 0;
   let thinkingChars = 0;
+  let toolCallArgsChars = 0;
 
   for (const item of message.content) {
     contentTypes.add(item.type);
@@ -435,6 +570,8 @@ function summarizeAssistantMessage(message: AssistantMessage, maxTextChars: numb
     }
     if (item.type === "toolCall") {
       toolCallNames.add(item.name);
+      const typedItem = item as unknown as JsonObject;
+      toolCallArgsChars += estimateSerializedLength(typedItem.input ?? typedItem.arguments ?? typedItem.args);
     }
   }
 
@@ -449,14 +586,48 @@ function summarizeAssistantMessage(message: AssistantMessage, maxTextChars: numb
     contentTypes: [...contentTypes].sort(),
     toolCallCount: toolCallNames.size,
     toolCallNames: [...toolCallNames].sort(),
+    toolCallArgsChars,
     textChars,
     thinkingChars,
     firstTextPreview:
       firstText && firstText.type === "text"
-        ? truncateText(firstText.text, maxTextChars)
+        ? truncateText(firstText.text, Math.min(maxTextChars, previewChars))
         : undefined,
   };
 }
+
+function hasProviderUsage(usage: unknown): usage is { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number } {
+  if (!usage || typeof usage !== "object") return false;
+  const typedUsage = usage as Record<string, unknown>;
+  return ["input", "output", "cacheRead", "cacheWrite", "totalTokens"].some((key) => {
+    const value = typedUsage[key];
+    return typeof value === "number" && value > 0;
+  });
+}
+
+function buildEstimatedUsage(promptChars: number, outputChars: number): JsonObject | undefined {
+  const input = estimateTokenCount(promptChars);
+  const output = estimateTokenCount(outputChars);
+  const totalTokens = input + output;
+  if (totalTokens <= 0) {
+    return undefined;
+  }
+
+  return {
+    input,
+    output,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens,
+    source: "estimate",
+    estimator: `chars/${TOKEN_ESTIMATE_DIVISOR}`,
+  };
+}
+
+type LocalHealthSample = {
+  durationMs: number;
+  failed: boolean;
+};
 
 function enqueueWrite(filePath: string, line: string): Promise<void> {
   const previous = writeChains.get(filePath) ?? Promise.resolve();
@@ -470,11 +641,17 @@ function enqueueWrite(filePath: string, line: string): Promise<void> {
     });
 
   writeChains.set(filePath, next);
+  void next.finally(() => {
+    if (writeChains.get(filePath) === next) {
+      writeChains.delete(filePath);
+    }
+  });
   return next;
 }
 
 export class SmartRouterRequestLogger {
   private readonly startedAt = Date.now();
+  private lastPayloadSummary?: JsonObject;
 
   constructor(
     private readonly logger: SmartRouterLogger,
@@ -521,9 +698,11 @@ export class SmartRouterRequestLogger {
       onPayload: async (payload: unknown, model: Model<Api>) => {
         const nextPayload = await existingOnPayload?.(payload, model);
         const finalPayload = nextPayload !== undefined ? nextPayload : payload;
+        const payloadSummary = summarizePayload(finalPayload);
+        this.lastPayloadSummary = payloadSummary;
         this.logger.write({
           ...this.baseEvent("payload"),
-          payloadSummary: summarizePayload(finalPayload),
+          payloadSummary,
           payloadDigest: digest(redactValue(finalPayload)),
           payloadModel: {
             provider: model.provider,
@@ -539,12 +718,25 @@ export class SmartRouterRequestLogger {
   }
 
   logResponse(params: SmartRouterResponseLog): void {
+    const responseSummary = summarizeAssistantMessage(
+      params.message,
+      this.logger.maxTextChars,
+      this.logger.previewChars,
+    );
+    const usage = hasProviderUsage(params.message.usage)
+      ? params.message.usage
+      : buildEstimatedUsage(
+          Number((this.lastPayloadSummary?.promptBreakdown as JsonObject | undefined)?.estimatedPromptChars ?? 0),
+          Number(responseSummary.textChars ?? 0) + Number(responseSummary.thinkingChars ?? 0) + Number(responseSummary.toolCallArgsChars ?? 0),
+        );
+
     this.logger.write({
       ...this.baseEvent(params.kind),
       durationMs: Date.now() - this.startedAt,
       eventCounts: params.eventCounts,
-      usage: params.message.usage,
-      responseSummary: summarizeAssistantMessage(params.message, this.logger.maxTextChars),
+      usage,
+      usageSource: hasProviderUsage(params.message.usage) ? "provider" : usage ? "estimate" : undefined,
+      responseSummary,
       error: formatError(params.thrownError) ?? params.message.errorMessage,
     });
   }
@@ -579,6 +771,12 @@ export class SmartRouterRequestLogger {
       turnIndex: this.info.turnIndex,
       rootTurnId: this.info.rootTurnId,
       parentRequestId: this.info.parentRequestId,
+      toolExposureMode: this.info.toolExposureMode,
+      toolExposureApplied: this.info.toolExposureApplied,
+      originalToolCount: this.info.originalToolCount,
+      retainedToolCount: this.info.retainedToolCount,
+      routeAdjustmentReason: this.info.routeAdjustmentReason,
+      localHealth: this.info.localHealth,
     };
   }
 }
@@ -588,9 +786,11 @@ export class SmartRouterLogger {
   readonly includePayloadBody: boolean;
   readonly filePath: string;
   readonly maxTextChars: number;
+  readonly previewChars: number;
   readonly retentionDays: number;
   private lastPrunedDate?: string;
   private readonly lastRequestIdByTurn = new Map<string, string>();
+  private readonly localHealthSamples: LocalHealthSample[] = [];
 
   constructor(config: SmartRouterLoggerConfig = {}) {
     this.enabled = parseBoolean(process.env.OPENCLAW_SMART_ROUTER_LOG, config.enabled ?? true);
@@ -603,6 +803,10 @@ export class SmartRouterLogger {
       process.env.OPENCLAW_SMART_ROUTER_LOG_TEXT_LIMIT,
       config.maxTextChars ?? DEFAULT_MAX_TEXT_CHARS,
     );
+    this.previewChars = parseNumber(
+      process.env.OPENCLAW_SMART_ROUTER_LOG_PREVIEW_LIMIT,
+      config.previewChars ?? DEFAULT_PREVIEW_CHARS,
+    );
     this.retentionDays = clampPositiveInteger(
       parseNumber(
         process.env.OPENCLAW_SMART_ROUTER_LOG_RETENTION_DAYS,
@@ -610,6 +814,49 @@ export class SmartRouterLogger {
       ),
       DEFAULT_RETENTION_DAYS,
     );
+  }
+
+  getLocalHealthSnapshot(): SmartRouterLocalHealthSnapshot {
+    if (this.localHealthSamples.length === 0) {
+      return {
+        sampleCount: 0,
+        errorCount: 0,
+        errorRate: 0,
+        p95Ms: 0,
+      };
+    }
+
+    const sortedDurations = this.localHealthSamples
+      .map((sample) => sample.durationMs)
+      .filter((duration) => Number.isFinite(duration) && duration >= 0)
+      .sort((left, right) => left - right);
+    const p95Index = Math.max(Math.ceil(sortedDurations.length * 0.95) - 1, 0);
+    const errorCount = this.localHealthSamples.filter((sample) => sample.failed).length;
+
+    return {
+      sampleCount: this.localHealthSamples.length,
+      errorCount,
+      errorRate: Number((errorCount / this.localHealthSamples.length).toFixed(4)),
+      p95Ms: sortedDurations[p95Index] ?? 0,
+    };
+  }
+
+  private recordLocalHealth(event: SmartRouterLogEvent): void {
+    if (event.routeTier !== "local") {
+      return;
+    }
+
+    if (!["response", "response_error", "stream_failure"].includes(event.event)) {
+      return;
+    }
+
+    const durationMs = typeof event.durationMs === "number" ? event.durationMs : 0;
+    const failed = event.event !== "response";
+    this.localHealthSamples.push({ durationMs, failed });
+
+    while (this.localHealthSamples.length > LOCAL_HEALTH_SAMPLE_LIMIT) {
+      this.localHealthSamples.shift();
+    }
   }
 
   createRequest(info: SmartRouterRouteInfo): SmartRouterRequestLogger {
@@ -634,6 +881,8 @@ export class SmartRouterLogger {
     const serialized = safeJsonStringify(event);
     if (!serialized) return;
 
+    this.recordLocalHealth(event);
+
     const now = new Date();
     const datedFilePath = resolveDatedLogPath(this.filePath, now);
     const currentDate = formatLogDate(now);
@@ -651,4 +900,8 @@ export class SmartRouterLogger {
 
 export function createSmartRouterLogger(config: SmartRouterLoggerConfig = {}): SmartRouterLogger {
   return new SmartRouterLogger(config);
+}
+
+export async function flushAllSmartRouterLogs(): Promise<void> {
+  await waitForPendingWrites();
 }

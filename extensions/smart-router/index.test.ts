@@ -54,4 +54,65 @@ describe("smart-router stream label injection", () => {
     const result = await catalogRun?.();
     expect(result?.provider.models.map((model) => model.id)).toEqual(["auto", "local", "nano", "mini", "full"]);
   });
+
+  it("detects explicit tool intent keywords", () => {
+    expect(__testing.hasExplicitToolIntent("로그 파일을 read 해서 분석해줘")).toBe(true);
+    expect(__testing.hasExplicitToolIntent("안녕, 오늘 기분 어때?")).toBe(false);
+  });
+
+  it("prunes tools for local route in conservative mode", () => {
+    const result = __testing.applyToolExposurePolicy(
+      { tools: [{ name: "read" }, { name: "write" }] },
+      "local",
+      "안녕, 한 줄로 답해줘",
+      { hasToolUse: false },
+      "conservative",
+    );
+
+    expect(result.applied).toBe(true);
+    expect(result.originalToolCount).toBe(2);
+    expect(result.retainedToolCount).toBe(0);
+    expect((result.context as { tools: unknown[] }).tools).toEqual([]);
+  });
+
+  it("keeps tools when explicit tool intent exists", () => {
+    const result = __testing.applyToolExposurePolicy(
+      { tools: [{ name: "read" }, { name: "write" }] },
+      "local",
+      "로그 파일을 read 해서 비교해줘",
+      { hasToolUse: false },
+      "conservative",
+    );
+
+    expect(result.applied).toBe(false);
+    expect(result.retainedToolCount).toBe(2);
+  });
+
+  it("escalates local routing when p95 latency is too high", () => {
+    const reason = __testing.shouldEscalateLocalRoute(
+      { sampleCount: 4, errorCount: 0, errorRate: 0, p95Ms: 16000 },
+      {
+        latencyAwareRouting: true,
+        localLatencyP95ThresholdMs: 12000,
+        localErrorRateThreshold: 0.25,
+        localHealthMinSamples: 3,
+      },
+    );
+
+    expect(reason).toContain("p95");
+  });
+
+  it("does not escalate local routing before minimum samples", () => {
+    const reason = __testing.shouldEscalateLocalRoute(
+      { sampleCount: 2, errorCount: 1, errorRate: 0.5, p95Ms: 20000 },
+      {
+        latencyAwareRouting: true,
+        localLatencyP95ThresholdMs: 12000,
+        localErrorRateThreshold: 0.25,
+        localHealthMinSamples: 3,
+      },
+    );
+
+    expect(reason).toBeUndefined();
+  });
 });

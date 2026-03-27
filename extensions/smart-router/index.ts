@@ -36,11 +36,13 @@ import {
 } from "@mariozechner/pi-ai";
 import {
   createSmartRouterLogger,
+  type SmartRouterLocalHealthSnapshot,
   type SmartRouterRequestLogger,
 } from "./smart-router-log.js";
 
 /** 평가 모드 */
 export type EvaluationMode = "rule" | "llm";
+export type ToolExposureMode = "full" | "conservative" | "minimal";
 
 type SmartRouterModelId = "auto" | "local" | "nano" | "mini" | "full";
 
@@ -73,7 +75,13 @@ const DEFAULTS = {
   logEnabled: true,
   logPayloadBody: false,
   logMaxTextChars: 600,
+  logPreviewChars: 240,
   logRetentionDays: 10,
+  toolExposureMode: "conservative" as ToolExposureMode,
+  latencyAwareRouting: true,
+  localLatencyP95ThresholdMs: 12_000,
+  localErrorRateThreshold: 0.25,
+  localHealthMinSamples: 3,
 } as const;
 
 type ResolvedConfig = ReturnType<typeof resolveConfig>;
@@ -157,7 +165,20 @@ function resolveConfig(pluginConfig?: Record<string, unknown>) {
           ? DEFAULTS.logPayloadBody
           : String(pluginConfig.logPayloadBody).toLowerCase() === "true",
     logMaxTextChars: Number(pluginConfig?.logMaxTextChars ?? DEFAULTS.logMaxTextChars),
+    logPreviewChars: Number(pluginConfig?.logPreviewChars ?? DEFAULTS.logPreviewChars),
     logRetentionDays: Number(pluginConfig?.logRetentionDays ?? DEFAULTS.logRetentionDays),
+    toolExposureMode: (pluginConfig?.toolExposureMode as ToolExposureMode | undefined) ?? DEFAULTS.toolExposureMode,
+    latencyAwareRouting:
+      typeof pluginConfig?.latencyAwareRouting === "boolean"
+        ? pluginConfig.latencyAwareRouting
+        : pluginConfig?.latencyAwareRouting === undefined
+          ? DEFAULTS.latencyAwareRouting
+          : String(pluginConfig.latencyAwareRouting).toLowerCase() === "true",
+    localLatencyP95ThresholdMs: Number(
+      pluginConfig?.localLatencyP95ThresholdMs ?? DEFAULTS.localLatencyP95ThresholdMs,
+    ),
+    localErrorRateThreshold: Number(pluginConfig?.localErrorRateThreshold ?? DEFAULTS.localErrorRateThreshold),
+    localHealthMinSamples: Number(pluginConfig?.localHealthMinSamples ?? DEFAULTS.localHealthMinSamples),
   };
 }
 
@@ -440,6 +461,127 @@ function detectToolUse(context: unknown): boolean {
   });
 }
 
+function countAvailableTools(context: unknown): number {
+  if (!context || typeof context !== "object") return 0;
+  const tools = (context as Record<string, unknown>).tools;
+  return Array.isArray(tools) ? tools.length : 0;
+}
+
+function hasExplicitToolIntent(message: string): boolean {
+  const lower = message.toLowerCase();
+  return [
+    "tool",
+    "read",
+    "write",
+    "file",
+    "directory",
+    "folder",
+    "path",
+    "search",
+    "fetch",
+    "browse",
+    "web",
+    "open",
+    "exec",
+    "run",
+    "command",
+    "sql",
+    "query",
+    "webhook",
+    "로그",
+    "파일",
+    "폴더",
+    "검색",
+    "실행",
+    "명령어",
+    "웹",
+    "조회",
+  ].some((keyword) => lower.includes(keyword));
+}
+
+function pruneContextTools(context: unknown): unknown {
+  if (!context || typeof context !== "object") {
+    return context;
+  }
+
+  const typedContext = context as Record<string, unknown>;
+  if (!Array.isArray(typedContext.tools) || typedContext.tools.length === 0) {
+    return context;
+  }
+
+  return {
+    ...typedContext,
+    tools: [],
+  };
+}
+
+function applyToolExposurePolicy(
+  context: unknown,
+  routeTier: RouteTarget,
+  message: string,
+  evalContext: EvaluationContext,
+  mode: ToolExposureMode,
+): {
+  context: unknown;
+  applied: boolean;
+  originalToolCount: number;
+  retainedToolCount: number;
+} {
+  const originalToolCount = countAvailableTools(context);
+  if (mode === "full" || originalToolCount === 0) {
+    return {
+      context,
+      applied: false,
+      originalToolCount,
+      retainedToolCount: originalToolCount,
+    };
+  }
+
+  const explicitToolIntent = hasExplicitToolIntent(message) || Boolean(evalContext.hasToolUse);
+  const shouldPrune =
+    !explicitToolIntent &&
+    ((mode === "conservative" && routeTier === "local") ||
+      (mode === "minimal" && (routeTier === "local" || routeTier === "mini")));
+
+  if (!shouldPrune) {
+    return {
+      context,
+      applied: false,
+      originalToolCount,
+      retainedToolCount: originalToolCount,
+    };
+  }
+
+  return {
+    context: pruneContextTools(context),
+    applied: true,
+    originalToolCount,
+    retainedToolCount: 0,
+  };
+}
+
+function shouldEscalateLocalRoute(
+  snapshot: SmartRouterLocalHealthSnapshot,
+  config: Pick<
+    ResolvedConfig,
+    "latencyAwareRouting" | "localLatencyP95ThresholdMs" | "localErrorRateThreshold" | "localHealthMinSamples"
+  >,
+): string | undefined {
+  if (!config.latencyAwareRouting || snapshot.sampleCount < config.localHealthMinSamples) {
+    return undefined;
+  }
+
+  if (snapshot.errorRate >= config.localErrorRateThreshold) {
+    return `local error rate ${snapshot.errorRate} >= ${config.localErrorRateThreshold}`;
+  }
+
+  if (snapshot.p95Ms >= config.localLatencyP95ThresholdMs) {
+    return `local p95 ${snapshot.p95Ms}ms >= ${config.localLatencyP95ThresholdMs}ms`;
+  }
+
+  return undefined;
+}
+
 function extractSessionId(options: unknown): string | undefined {
   if (!options || typeof options !== "object") {
     return undefined;
@@ -490,6 +632,9 @@ export const __testing = {
   prependModelLabel,
   wrapStreamWithModelLabel,
   parseSmartRouterModelId,
+  hasExplicitToolIntent,
+  applyToolExposurePolicy,
+  shouldEscalateLocalRoute,
 };
 
 // ---------------------------------------------------------------------------
@@ -509,6 +654,7 @@ export default definePluginEntry({
       filePath: pluginConfig.logFilePath,
       includePayloadBody: pluginConfig.logPayloadBody,
       maxTextChars: pluginConfig.logMaxTextChars,
+      previewChars: pluginConfig.logPreviewChars,
       retentionDays: pluginConfig.logRetentionDays,
     });
 
@@ -739,7 +885,35 @@ export default definePluginEntry({
                   return ruleDecision;
                 })();
 
-          const routed = resolveRouteModel(pluginConfig, decision.target);
+          let adjustedDecision = decision;
+          const localHealth = executionLogger.getLocalHealthSnapshot();
+          const routeAdjustmentReason =
+            adjustedDecision.target === "local"
+              ? shouldEscalateLocalRoute(localHealth, pluginConfig)
+              : undefined;
+
+          if (routeAdjustmentReason) {
+            adjustedDecision = {
+              ...adjustedDecision,
+              target: "mini",
+              reason: `${adjustedDecision.reason} | [health] ${routeAdjustmentReason}`,
+            };
+            if (evaluationTrace) {
+              evaluationTrace = {
+                ...evaluationTrace,
+                finalTarget: "mini",
+              };
+            }
+          }
+
+          const routed = resolveRouteModel(pluginConfig, adjustedDecision.target);
+          const toolExposure = applyToolExposurePolicy(
+            context,
+            routed.tier,
+            lastMessage,
+            evalContext,
+            pluginConfig.toolExposureMode,
+          );
           const requestLogger = executionLogger.createRequest({
             requestedModelId: requestedModelId ?? String((model as Record<string, unknown>)?.id ?? "unknown"),
             routeMode: "auto",
@@ -756,14 +930,20 @@ export default definePluginEntry({
             sessionId,
             turnIndex,
             rootTurnId,
-            context,
+            toolExposureMode: pluginConfig.toolExposureMode,
+            toolExposureApplied: toolExposure.applied,
+            originalToolCount: toolExposure.originalToolCount,
+            retainedToolCount: toolExposure.retainedToolCount,
+            routeAdjustmentReason,
+            localHealth,
+            context: toolExposure.context,
             extraParams: ctx.extraParams,
             streamOptions: options,
             decision: {
-              level: decision.level,
-              reason: decision.reason,
-              scoreTotal: decision.score.total,
-              scoreBreakdown: decision.score.breakdown,
+              level: adjustedDecision.level,
+              reason: adjustedDecision.reason,
+              scoreTotal: adjustedDecision.score.total,
+              scoreBreakdown: adjustedDecision.score.breakdown,
             },
           });
           if (evaluationTrace) {
@@ -773,10 +953,10 @@ export default definePluginEntry({
 
           // 3. 라우팅 결정 로그
           const logPrefix = `[smart-router]`;
-          const targetEmoji = decision.target === "local" ? "🏠" : "☁️";
+          const targetEmoji = adjustedDecision.target === "local" ? "🏠" : "☁️";
           const modeTag = pluginConfig.evaluationMode === "llm" ? "LLM" : "rule";
           console.log(
-            `${logPrefix} ${targetEmoji} ${decision.level} (score: ${decision.score.total}, eval: ${modeTag}) → ${routed.label} | ${decision.reason}`,
+            `${logPrefix} ${targetEmoji} ${adjustedDecision.level} (score: ${adjustedDecision.score.total}, eval: ${modeTag}) → ${routed.label} | ${adjustedDecision.reason}`,
           );
 
           const routedModel = {
@@ -793,7 +973,7 @@ export default definePluginEntry({
           try {
             stream = (await baseStreamFn(
               routedModel as Parameters<typeof baseStreamFn>[0],
-              context as Parameters<typeof baseStreamFn>[1],
+              toolExposure.context as Parameters<typeof baseStreamFn>[1],
               requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
             )) as AssistantStream;
           } catch (error) {
@@ -803,7 +983,7 @@ export default definePluginEntry({
 
           return wrapStreamWithModelLabel(
             stream,
-            pluginConfig.showModelLabel ? buildModelLabel(routed, decision.level) : undefined,
+            pluginConfig.showModelLabel ? buildModelLabel(routed, adjustedDecision.level) : undefined,
             requestLogger,
           );
         };

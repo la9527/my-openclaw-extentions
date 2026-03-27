@@ -109,9 +109,34 @@
         "type": "number",
         "description": "응답 미리보기나 텍스트 필드 로그 시 최대 문자 수. 기본: 600"
       },
+      "logPreviewChars": {
+        "type": "number",
+        "description": "responseSummary.firstTextPreview 최대 문자 수. 기본: 240"
+      },
       "logRetentionDays": {
         "type": "number",
         "description": "날짜별 실행 로그 파일을 몇 일치 보관할지 설정. 기본: 10, 0 이하면 무제한 보관"
+      },
+      "toolExposureMode": {
+        "type": "string",
+        "enum": ["full", "conservative", "minimal"],
+        "description": "tool schema 노출 정책. full=항상 전체, conservative=local/simple 경로만 축소, minimal=local/mini 경로를 더 적극 축소"
+      },
+      "latencyAwareRouting": {
+        "type": "boolean",
+        "description": "최근 local latency/error rate를 보고 local 대신 mini로 승격할지 여부. 기본: true"
+      },
+      "localLatencyP95ThresholdMs": {
+        "type": "number",
+        "description": "latency-aware routing에서 local p95 지연시간 기준(ms). 기본: 12000"
+      },
+      "localErrorRateThreshold": {
+        "type": "number",
+        "description": "latency-aware routing에서 local 오류율 기준. 기본: 0.25"
+      },
+      "localHealthMinSamples": {
+        "type": "number",
+        "description": "latency-aware routing 판단 전에 필요한 최근 local 샘플 수. 기본: 3"
       }
     }
   }

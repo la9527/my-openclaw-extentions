@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSmartRouterLogger } from "./smart-router-log.js";
+import { createSmartRouterLogger, flushAllSmartRouterLogs } from "./smart-router-log.js";
 
 type TempDirState = {
   path: string;
@@ -17,6 +17,7 @@ async function createTempLogPath(): Promise<string> {
 }
 
 afterEach(async () => {
+  await flushAllSmartRouterLogs();
   while (tempDirs.length > 0) {
     const tempDir = tempDirs.pop();
     if (!tempDir) break;
@@ -156,9 +157,174 @@ describe("smart-router execution logger", () => {
     expect(lines[1]?.rootTurnId).toBe("sess-1:turn:1");
     expect(lines[1]?.sessionId).toBe("sess-1");
     expect(lines[2]?.payloadSummary).toMatchObject({ toolCount: 1 });
+    expect(lines[2]?.payloadSummary).toMatchObject({
+      promptBreakdown: {
+        systemChars: expect.any(Number),
+        currentUserChars: expect.any(Number),
+        toolSchemaChars: expect.any(Number),
+      },
+    });
     expect(lines[2]?.payload).toMatchObject({ authorization: "<redacted>" });
     expect(lines[3]?.usage).toMatchObject({ totalTokens: 168 });
     expect(lines[3]?.responseSummary).toMatchObject({ textChars: 22, stopReason: "stop" });
+  });
+
+  it("estimates usage for local responses when provider usage is missing", async () => {
+    const filePath = await createTempLogPath();
+    const logger = createSmartRouterLogger({ enabled: true, filePath });
+
+    const requestLogger = logger.createRequest({
+      requestedModelId: "auto",
+      routeMode: "auto",
+      evaluationMode: "rule",
+      threshold: "moderate",
+      routeTier: "local",
+      routeProvider: "smart-router",
+      routeModel: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      routeApi: "openai-completions",
+      routeLabel: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      context: { messages: [{ role: "user", content: [{ type: "text", text: "hello router" }] }] },
+    });
+
+    const wrappedOptions = requestLogger.wrapOptions({}) as {
+      onPayload?: (payload: unknown, model: { provider: string; api: string; id: string }) => Promise<unknown>;
+    };
+
+    await wrappedOptions.onPayload?.(
+      {
+        messages: [
+          { role: "system", content: "system prompt here" },
+          { role: "user", content: [{ type: "text", text: "hello router" }] },
+        ],
+        tools: [{ type: "function", name: "searchWeb", parameters: { type: "object" } }],
+      },
+      {
+        provider: "smart-router",
+        api: "openai-completions",
+        id: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      },
+    );
+
+    requestLogger.logResponse({
+      kind: "response",
+      eventCounts: { done: 1 },
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "local reply without usage" }],
+        api: "openai-completions",
+        provider: "smart-router",
+        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    });
+
+    await logger.flush();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const datedLogPath = filePath.replace(/\.jsonl$/u, `-${today}.jsonl`);
+    const lines = (await readFile(datedLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(lines.at(-1)?.usageSource).toBe("estimate");
+    expect(lines.at(-1)?.usage).toMatchObject({
+      input: expect.any(Number),
+      output: expect.any(Number),
+      source: "estimate",
+    });
+  });
+
+  it("applies previewChars separately from maxTextChars", async () => {
+    const filePath = await createTempLogPath();
+    const logger = createSmartRouterLogger({
+      enabled: true,
+      filePath,
+      maxTextChars: 500,
+      previewChars: 20,
+    });
+
+    const requestLogger = logger.createRequest({
+      requestedModelId: "auto",
+      routeMode: "auto",
+      evaluationMode: "rule",
+      threshold: "moderate",
+      routeTier: "mini",
+      routeProvider: "openai",
+      routeModel: "gpt-5.4-mini-2026-03-17",
+      routeApi: "openai-responses",
+      routeLabel: "mini:gpt-5.4-mini-2026-03-17",
+      context: { messages: [{ role: "user", content: "preview test" }] },
+    });
+
+    requestLogger.logResponse({
+      kind: "response",
+      eventCounts: { done: 1 },
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "012345678901234567890123456789" }],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-5.4-mini-2026-03-17",
+        usage: {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    });
+
+    await logger.flush();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const datedLogPath = filePath.replace(/\.jsonl$/u, `-${today}.jsonl`);
+    const lines = (await readFile(datedLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(String((lines[0]?.responseSummary as Record<string, unknown>)?.firstTextPreview)).toContain("[truncated");
+  });
+
+  it("tracks recent local health snapshots", async () => {
+    const filePath = await createTempLogPath();
+    const logger = createSmartRouterLogger({ enabled: true, filePath });
+
+    logger.write({ ts: new Date().toISOString(), event: "response", requestId: "req-a", routeTier: "local", durationMs: 500 });
+    logger.write({ ts: new Date().toISOString(), event: "response", requestId: "req-b", routeTier: "local", durationMs: 1500 });
+    logger.write({ ts: new Date().toISOString(), event: "stream_failure", requestId: "req-c", routeTier: "local", durationMs: 2500 });
+
+    const snapshot = logger.getLocalHealthSnapshot();
+    expect(snapshot.sampleCount).toBe(3);
+    expect(snapshot.errorCount).toBe(1);
+    expect(snapshot.errorRate).toBeCloseTo(1 / 3, 4);
+    expect(snapshot.p95Ms).toBe(2500);
+  });
+
+  it("flushes all pending writes before teardown", async () => {
+    const filePath = await createTempLogPath();
+    const logger = createSmartRouterLogger({ enabled: true, filePath });
+
+    logger.write({ ts: new Date().toISOString(), event: "route", requestId: "req-flush" });
+    await flushAllSmartRouterLogs();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const datedLogPath = filePath.replace(/\.jsonl$/u, `-${today}.jsonl`);
+    await expect(readFile(datedLogPath, "utf8")).resolves.toContain('"req-flush"');
   });
 
   it("links repeated requests in the same turn with parentRequestId", async () => {
