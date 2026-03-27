@@ -71,6 +71,39 @@ describe("evaluateComplexity", () => {
     expect(decision.target).toBe("full");
   });
 
+  it("운영 정책과 KPI/경보/폴백 설계 요청은 full tier 로 승격한다", () => {
+    const message = [
+      "smart-router 운영 정책을 다시 설계해줘.",
+      "local, nano, mini, full 기준을 표로 정리하고 KPI와 경보 조건을 포함해줘.",
+      "fallback policy, rollout 순서, 검증 계획, trade-off까지 함께 설명해줘.",
+    ].join(" ");
+
+    const decision = evaluateComplexity(message, { turnCount: 9, hasToolUse: true });
+
+    expect(decision.level).toBe("advanced");
+    expect(decision.target).toBe("full");
+    expect(decision.reason).toContain("고급 설계/운영 신호");
+  });
+
+  it("짧지만 명시적인 advanced 운영 설계 프롬프트도 full tier 로 승격한다", () => {
+    const message = "large-scale 운영을 가정하고 smart-router full 승격 기준을 재설계해줘. threat model, capacity planning, KPI, runbook, end-to-end validation을 포함해줘.";
+
+    const decision = evaluateComplexity(message);
+
+    expect(decision.level).toBe("advanced");
+    expect(decision.target).toBe("full");
+  });
+
+  it("단일 주제의 운영 분석 요청은 advanced 로 과승격되지 않는다", () => {
+    const decision = evaluateComplexity(
+      "사용자 요청 난이도 분류에서 false positive를 줄이는 기준과 threshold 조정 방법을 단계별로 설명해줘."
+        .padEnd(260, " "),
+    );
+
+    expect(decision.level).toBe("moderate");
+    expect(decision.target).toBe("nano");
+  });
+
   it("score breakdown 을 계산한다", () => {
     const decision = evaluateComplexity("REST API endpoint 를 만들어서 database query 최적화해줘", {
       hasToolUse: true,

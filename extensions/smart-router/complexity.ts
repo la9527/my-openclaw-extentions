@@ -110,6 +110,9 @@ const COMPLEX_KEYWORDS = [
   "compare", "비교",
   "evaluate", "평가",
   "review", "리뷰",
+  "false positive", "false negative",
+  "threshold", "임계값",
+  "p95", "error rate",
   "explain in detail", "자세히 설명",
   "step by step", "단계별",
   "pros and cons", "장단점",
@@ -118,6 +121,26 @@ const COMPLEX_KEYWORDS = [
   "create a", "만들어",
   "write a", "작성",
   "build", "빌드",
+] as const;
+
+/** full tier 승격을 시사하는 고급 설계/운영 키워드 */
+const ADVANCED_KEYWORDS = [
+  "rollout", "롤아웃",
+  "runbook", "런북",
+  "migration strategy", "마이그레이션 전략",
+  "fallback policy", "fallback", "폴백",
+  "threat model", "위협 모델",
+  "failure mode", "장애 모드",
+  "capacity planning", "용량 계획",
+  "slo", "sla",
+  "kpi", "alert", "경보",
+  "observability", "관측성",
+  "operational policy", "운영 정책",
+  "실험 설계", "평가 설계",
+  "검증 계획", "측정 계획",
+  "의사결정 기준", "trade-off", "트레이드오프",
+  "전체 시스템", "end-to-end", "종단간",
+  "거버넌스", "compliance", "로드맵",
 ] as const;
 
 /** 단순 요청을 시사하는 키워드 */
@@ -207,6 +230,33 @@ function scoreKeywords(text: string): number {
   return MAX_KEYWORD_SCORE;
 }
 
+function countAdvancedSignals(text: string, context?: EvaluationContext): number {
+  const lower = text.toLowerCase();
+  let signals = 0;
+
+  for (const keyword of ADVANCED_KEYWORDS) {
+    if (lower.includes(keyword.toLowerCase())) {
+      signals += 1;
+    }
+  }
+
+  const multiObjectivePattern = /(설계|분석|평가|검증|운영|마이그레이션|보안|성능).*(설계|분석|평가|검증|운영|마이그레이션|보안|성능)/i;
+  if (multiObjectivePattern.test(text)) {
+    signals += 1;
+  }
+
+  const explicitDeliverablePattern = /(표로|표 형태|로드맵|runbook|체크리스트|단계별 계획|실행 계획|경보 조건|의사결정 기준)/i;
+  if (explicitDeliverablePattern.test(text)) {
+    signals += 1;
+  }
+
+  if ((context?.turnCount ?? 0) >= 8 && context?.hasToolUse) {
+    signals += 1;
+  }
+
+  return Math.min(signals, 4);
+}
+
 // ---------------------------------------------------------------------------
 // Main evaluation
 // ---------------------------------------------------------------------------
@@ -257,6 +307,7 @@ export function evaluateComplexity(
     depth: scoreDepth(context),
     keywords: scoreKeywords(message),
   };
+  const advancedSignals = countAdvancedSignals(message, context);
 
   // 짧은 인사/단답은 긴 세션 맥락 때문에 remote tier로 밀리지 않게 고정한다.
   if (
@@ -281,7 +332,15 @@ export function evaluateComplexity(
   }
 
   const total = breakdown.length + breakdown.code + breakdown.tools + breakdown.depth + breakdown.keywords;
-  const level = levelFromScore(total);
+  const hasExplicitAdvancedBundle = advancedSignals >= 4 && total >= 2;
+  const hasStructuredAdvancedBundle = advancedSignals >= 3 && total >= THRESHOLD_MODERATE;
+  const hasHeavyAdvancedBundle = advancedSignals >= 2 && total >= THRESHOLD_COMPLEX;
+  const shouldPromoteToAdvanced =
+    hasExplicitAdvancedBundle ||
+    (hasStructuredAdvancedBundle && (breakdown.length >= 2 || breakdown.code >= 1 || breakdown.tools >= 1 || breakdown.depth >= 1)) ||
+    (hasHeavyAdvancedBundle && (breakdown.length >= 2 || breakdown.code >= 1 || breakdown.tools >= 1 || breakdown.depth >= 1));
+  const effectiveTotal = shouldPromoteToAdvanced ? Math.max(total, THRESHOLD_ADVANCED) : total;
+  const level = levelFromScore(effectiveTotal);
   const target = routeTargetFromLevel(level, remoteThreshold);
 
   const reasons: string[] = [];
@@ -290,11 +349,12 @@ export function evaluateComplexity(
   if (breakdown.depth >= 2) reasons.push("깊은 대화 맥락");
   if (breakdown.length >= 3) reasons.push("장문 입력");
   if (breakdown.keywords >= 2) reasons.push("복잡한 작업 키워드");
+  if (shouldPromoteToAdvanced) reasons.push("고급 설계/운영 신호");
   if (reasons.length === 0) reasons.push(target === "local" ? "단순 질의" : "복합 요청");
 
   return {
     level,
-    score: { total, breakdown },
+    score: { total: effectiveTotal, breakdown },
     target,
     reason: reasons.join(", "),
   };
@@ -326,7 +386,15 @@ Classification criteria:
 - simple: 인사, 간단한 질문, 번역, 날씨, 단답형 (예: "안녕", "오늘 날씨", "고마워")
 - moderate: 일반 지식 질문, 요약, 간단한 설명 요청 (예: "파이썬이 뭐야?", "docker 명령어 알려줘")
 - complex: 코드 작성/분석, 설계, 디버깅, 다단계 작업, 비교 분석 (예: "이 코드 리팩토링해줘", "아키텍처 설계해줘")
-- advanced: 대규모 코드베이스 분석, 복합 시스템 설계, 연구 수준 분석, 여러 도구 연동 (예: "마이크로서비스 전체 설계", "보안 감사")
+- advanced: 대규모 코드베이스 분석, 복합 시스템 설계, 연구 수준 분석, 여러 도구 연동, 운영 정책/KPI/경보/실험 설계, 마이그레이션·fallback·runbook·trade-off를 함께 다루는 요청 (예: "마이크로서비스 전체 설계와 롤아웃 전략", "운영 KPI/경보 기준과 fallback 정책을 표로 설계")
+
+Guardrails:
+- Do NOT classify as advanced just because the request is technical or mentions terms like false positive, p95, error rate, alert, schema, or metrics.
+- A single-topic explanation, checklist, or "3가지 제안" style answer is usually moderate.
+- Designing one component or one policy without rollout/runbook/governance/validation scope is usually complex, not advanced.
+- Classify as advanced only when the request is system-wide or end-to-end and combines at least two of the following: KPI/alerts, fallback/rollout/runbook, migration/governance/compliance, failure-mode/threat-model/capacity-planning, validation/experiment plan.
+
+If the user asks for decision criteria, validation plan, KPI/alert policy, migration strategy, rollout/runbook, or end-to-end operational design together, prefer advanced over complex.
 
 Consider: message length, code presence, technical depth, number of sub-tasks, domain expertise required.`;
 

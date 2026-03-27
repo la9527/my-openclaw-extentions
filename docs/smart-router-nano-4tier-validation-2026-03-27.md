@@ -98,6 +98,55 @@ pnpm exec vitest run smart-router-log.test.ts complexity.test.ts index.test.ts
 2. auto moderate는 실제로 `nano`로 간다.
 3. direct nano는 별도 선택 모델로 정상 동작한다.
 
+### 후속 40건 배치에서 추가로 확인된 점
+
+이후 같은 날 40건 follow-up 배치(`sr-followup-20260327-223857-*`)를 추가로 돌려보니, `advanced/full` 강화 자체는 성공했지만 부작용도 확인됐다.
+
+1. simple auto: `5 local / 1 nano`
+2. moderate auto: `5 nano / 3 full`
+3. complex auto: `1 mini / 4 full`
+4. advanced auto: `4 full / 1 local`
+
+즉, 초기 문제였던 `advanced -> full 미도달`은 크게 개선됐지만, 이번에는 `moderate/complex -> full` 과승격과 timeout fallback 으로 인한 `advanced -> local` under-route 가 동시에 나타났다.
+
+원인 로그를 확인하면:
+
+- `m4` 는 LLM classifier 가 `false positive` 완화 요청을 `advanced/full` 로 판정했다.
+- `a5` 는 LLM 평가가 timeout 되어 rule fallback 으로 `simple/local` 이 됐다.
+
+이 결과 때문에, 현재 문제의 중심은 단순 점수표가 아니라 `llm` classifier prompt 와 timeout fallback 품질이라는 점이 더 분명해졌다.
+
+### direct nano vs mini 8건 비교
+
+같은 moderate 프롬프트 8개를 direct selection 으로 비교했을 때:
+
+- `nano` 평균 응답시간: 약 `11.0s`
+- `mini` 평균 응답시간: 약 `4.9s`
+- `nano` 중앙값: 약 `5.8s`
+- `mini` 중앙값: 약 `4.1s`
+
+`nano` 에서 `49.7s` outlier 가 한 건 있어 평균 차이가 커졌지만, 중앙값 기준으로도 `mini`가 더 빠르다.
+
+즉, 현재 환경에서 moderate 일반 질의는 여전히 `mini` 쪽이 latency 면에서 유리하다.
+
+### retune 재검증 결과
+
+follow-up 배치 결과를 바탕으로 classifier prompt 와 fallback rule 을 한 번 더 조정한 뒤, 오분류 세션 중심으로 retune 배치(`sr-retune-20260327-231723-*`)를 다시 돌렸다.
+
+확인된 변화:
+
+1. `false positive` 완화 요청: `full -> mini`
+2. `경보 조건 3개` 요청: `full -> mini`
+3. `리팩토링 전략` 요청: `full -> mini`
+4. `장애 지점 분석` 요청: `full -> mini`
+5. `4-tier 운영 정책 재설계`: `full 유지`
+
+남은 잔여 이슈:
+
+1. `latency p95 + error rate` 판단 기준 요청은 여전히 `full`
+2. `nano 모델 역할` 같은 짧은 기술 질의는 `nano` 로 가며 `local` 로는 잘 내려오지 않음
+3. retune 에서 일부 예정 세션은 끝까지 완료되지 않아 timeout 재현성은 더 봐야 함
+
 ### 아직 미해결인 점
 
 1. advanced 프롬프트가 이번 샘플에서 `full`까지 올라가지 않았다.

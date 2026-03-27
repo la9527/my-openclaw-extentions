@@ -61,6 +61,78 @@
 
 즉, 현재 가장 먼저 손봐야 할 것은 `nano` 추가 자체보다도, `advanced/full`로 올려야 할 프롬프트를 분류기가 충분히 강하게 올려주도록 기준을 보정하는 일이다.
 
+## 40건 follow-up 배치와 retune 결과
+
+이 문서 작성 후 바로 다음 단계로, 실제 OpenClaw 실호출을 두 번 더 돌렸다.
+
+1. 40건 본배치: `sr-followup-20260327-223857-*`
+2. 오분류 재검증 retune 배치: `sr-retune-20260327-231723-*`
+
+### 40건 본배치 요약
+
+구성:
+
+- auto simple `6건`
+- auto moderate `8건`
+- auto complex `5건`
+- auto advanced `5건`
+- direct nano moderate `8건`
+- direct mini moderate `8건`
+
+핵심 결과:
+
+1. simple auto는 `5 local / 1 nano` 였다.
+2. moderate auto는 `5 nano / 3 full` 이었다.
+3. complex auto는 `1 mini / 4 full` 이었다.
+4. advanced auto는 `4 full / 1 local` 이었다.
+
+즉, 목표했던 `advanced/full 강화`는 달성됐지만, 같은 시점에 `moderate/complex -> full 과승격`과 `advanced -> local under-route`가 함께 나타났다.
+
+원인 확인:
+
+1. `m4`는 LLM classifier 가 `false positive` 완화 요청을 `advanced/full` 로 과승격했다.
+2. `a5`는 LLM 평가가 timeout 되어 rule fallback 으로 내려가면서 `simple/local` 이 됐다.
+
+이 관찰은 중요하다. 지금 문제는 단순히 rule 점수만이 아니라, 실제 live 구성에서 `evaluationMode=llm` 이 정책 품질을 더 크게 흔든다는 뜻이기 때문이다.
+
+### direct nano vs mini 비교
+
+같은 moderate 성격 프롬프트 8개를 direct selection 으로 비교한 결과:
+
+- `nano` 평균 응답시간: 약 `11.0s`
+- `mini` 평균 응답시간: 약 `4.9s`
+- `nano` 중앙값: 약 `5.8s`
+- `mini` 중앙값: 약 `4.1s`
+
+`nano`에서 `49.7s` outlier 가 한 번 있었지만, 이를 제외해도 `mini`가 여전히 더 빠른 쪽에 가깝다.
+
+따라서 현재 시점에서는 `moderate -> nano` 를 고정 정책으로 확정하기 어렵다.
+
+### retune 결과
+
+본배치 결과를 보고 바로 classifier 를 한 번 더 조정했다.
+
+변경점:
+
+1. rule fallback 에서 짧지만 명시적인 advanced 운영 설계 프롬프트를 `full` 로 승격할 수 있게 보정
+2. LLM classifier prompt 에 `기술 용어가 많아도 단일 주제 설명/체크리스트/3개 제안 요청은 advanced 가 아니다` 라는 guardrail 추가
+
+재검증에서 확인된 점:
+
+1. `false positive` 완화 요청: `full -> mini`
+2. `경보 조건 3개` 요청: `full -> mini`
+3. `리팩토링 전략` 요청: `full -> mini`
+4. `장애 지점 분석` 요청: `full -> mini`
+5. `4-tier 운영 정책 재설계`: `full 유지`
+
+남은 문제:
+
+1. `p95 + error rate` 판단 기준 요청은 여전히 `full`
+2. `nano 모델 역할` 같은 짧은 질의는 `local` 대신 `nano` 로 갈 수 있음
+3. retune 배치는 일부 세션만 완료돼, a5 류 timeout 재확인은 다음 차수에서 다시 필요함
+
+즉, 방향은 맞아졌지만 `llm` 분류는 아직 경계 구간에서 흔들린다.
+
 ## 현재 상태 요약
 
 2026-03-27 추가 결정으로, 다음 단계 auto routing의 기본 축은 `local -> nano -> mini -> full` 4-tier 구조로 본다. 기존 3-tier(`local -> mini -> full`) 실측 결과에서 `mini`가 가장 안정적인 균형점이었기 때문에, `nano`를 moderate 전용 경량 remote tier로 삽입해 응답시간과 비용 변화를 따로 관측하는 것이 우선 과제가 됐다.
@@ -80,6 +152,7 @@
 2. mini/full 경로의 prompt 비용이 여전히 크다.
 3. routing policy는 들어갔지만 실데이터 기반 튜닝은 아직 부족하다.
 4. 운영 집계는 가능해졌지만 자동 액션으로 이어지지 않는다.
+5. 특히 `llm` evaluation 은 advanced/full 강화와 과승격 억제를 동시에 만족시키려면 추가 guardrail 이 더 필요하다.
 
 ## 개선 우선순위
 
