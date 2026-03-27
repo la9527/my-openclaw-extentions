@@ -91,7 +91,7 @@
       },
       "showModelLabel": {
         "type": "boolean",
-        "description": "응답 첫 줄에 선택된 모델/tier 라벨을 표시할지 여부. 기본: true"
+        "description": "응답 첫 줄에 선택된 짧은 tier 라벨을 표시할지 여부. 기본: true. direct 수동 선택 경로 라벨은 채팅에 표시하지 않음"
       },
       "logEnabled": {
         "type": "boolean",

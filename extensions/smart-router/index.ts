@@ -218,11 +218,11 @@ function resolveRouteModel(config: ResolvedConfig, target: RouteTarget): RouteMo
 }
 
 function buildModelLabel(route: RouteModelConfig, level: ComplexityLevel): string {
-  return `[smart-router ${route.tier}/${level}] ${route.model}\n\n`;
+  return `<sub>[${route.tier}/${level}]</sub>\n\n`;
 }
 
 function buildDirectModelLabel(route: RouteModelConfig): string {
-  return `[smart-router ${route.tier}/direct] ${route.model}\n\n`;
+  return `<sub>[${route.tier}]</sub>\n\n`;
 }
 
 function parseSmartRouterModelId(modelId: unknown): SmartRouterModelId | undefined {
@@ -239,15 +239,19 @@ function parseSmartRouterModelId(modelId: unknown): SmartRouterModelId | undefin
 }
 
 function stripLeadingModelLabels(text: string): string {
-  let normalized = text;
+  let normalized = text.replace(/^\s+/u, "");
 
-  while (normalized.startsWith("[smart-router ")) {
-    const lineEnd = normalized.indexOf("\n");
-    if (lineEnd === -1) {
-      return "";
+  while (normalized.length > 0) {
+    const next = normalized
+      .replace(/^(?:<sub>\s*)?\[smart-router [^\]\n]+\][^\n]*?(?:<\/sub>)?\s*\n+/iu, "")
+      .replace(/^(?:<sub>\s*)?\[(?:local|nano|mini|full)(?:\/(?:simple|moderate|complex|advanced|direct))?\](?:<\/sub>)?\s*\n+/iu, "")
+      .replace(/^\s+/u, "");
+
+    if (next === normalized) {
+      break;
     }
 
-    normalized = normalized.slice(lineEnd + 1).replace(/^\s+/u, "");
+    normalized = next;
   }
 
   return normalized;
@@ -836,11 +840,7 @@ export default definePluginEntry({
               throw error;
             }
 
-            return wrapStreamWithModelLabel(
-              stream,
-              pluginConfig.showModelLabel ? buildDirectModelLabel(routed) : undefined,
-              requestLogger,
-            );
+            return wrapStreamWithModelLabel(stream, undefined, requestLogger);
           }
 
           // 1. 메시지 추출

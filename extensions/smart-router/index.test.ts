@@ -25,6 +25,24 @@ describe("smart-router stream label injection", () => {
     ).toBe(`${label}기존 라벨이 섞인 응답`);
   });
 
+  it("strips compact labels and leading whitespace before prepending", () => {
+    const label = __testing.buildModelLabel(
+      {
+        tier: "local",
+        provider: "lmstudio",
+        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        baseUrl: "http://127.0.0.1:1235/v1",
+        api: "openai",
+        contextWindow: 128000,
+        maxTokens: 16384,
+        label: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      },
+      "simple",
+    );
+
+    expect(__testing.prependModelLabel("  <sub>[full/direct]</sub>\n\n응답", label)).toBe(`${label}응답`);
+  });
+
   it("registers with a wrapStreamFn hook", () => {
     let wrapStreamFn: unknown;
     let catalogRun: undefined | (() => Promise<{ provider: { models: Array<{ id: string }> } }>);
