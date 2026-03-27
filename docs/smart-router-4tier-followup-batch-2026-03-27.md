@@ -146,6 +146,27 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 2. `nano 모델 역할` 같은 짧은 기술 질의는 `local` 이 아니라 `nano` 로 간다.
 3. retune 에서 일부 예정 세션은 끝까지 완료되지 않아 timeout 재현성은 더 확인이 필요하다.
 
+## 추가 calibration 재검증
+
+후속으로 아래 두 가지를 더 보정했다.
+
+1. `p95 + error rate` 같은 단일 metric 판단 요청은 `advanced` 응답이 와도 `complex/mini` 쪽으로 낮추는 calibration
+2. `nano 모델 역할`, `threshold 뜻` 같은 짧은 기술 설명 질의는 `simple/local` 로 낮추는 calibration
+
+짧은 실호출 재검증(`sr-calib-20260327-233246-*`) 결과:
+
+| 세션 | 질문 성격 | 결과 |
+| --- | --- | --- |
+| `1` | `p95 + error rate` 판단 기준 | `complex/mini` |
+| `2` | 일일 리포트 경보 조건 3개 | `advanced/full` |
+| `3` | nano 모델 역할 설명 | `simple/local` |
+| `4` | threshold 뜻 설명 | `simple/local` |
+
+해석:
+
+1. 이번 단계의 핵심 목표였던 `p95 + error rate` 과승격과 짧은 기술 설명의 과원격화는 해결됐다.
+2. 반면 `경보 조건 3개` 류는 여전히 `advanced/full` 로 보는 경향이 있어, 다음 보정은 alert-only 짧은 운영 요청을 `complex/mini` 로 낮추는 guardrail 이 된다.
+
 ## 현재 판단
 
 이번 follow-up 에서 도출된 결론은 아래와 같다.

@@ -127,11 +127,16 @@
 
 남은 문제:
 
-1. `p95 + error rate` 판단 기준 요청은 여전히 `full`
-2. `nano 모델 역할` 같은 짧은 질의는 `local` 대신 `nano` 로 갈 수 있음
-3. retune 배치는 일부 세션만 완료돼, a5 류 timeout 재확인은 다음 차수에서 다시 필요함
+1. `경보 조건 3개` 같은 alert-only 짧은 운영 요청은 아직 `full`
+2. retune 배치는 일부 세션만 완료돼, a5 류 timeout 재확인은 다음 차수에서 다시 필요함
 
 즉, 방향은 맞아졌지만 `llm` 분류는 아직 경계 구간에서 흔들린다.
+
+추가 진행 결과:
+
+1. `p95 + error rate` 질의는 calibration 이후 실제로 `complex/mini` 로 내려왔다.
+2. `nano 모델 역할`, `threshold 뜻` 같은 짧은 기술 설명 질의는 `simple/local` 로 내려왔다.
+3. 따라서 다음 미해결 항목은 `경보 조건 3개` 같은 alert-only 짧은 운영 요청을 `advanced/full` 에서 얼마나 더 낮출지로 좁혀졌다.
 
 ## 현재 상태 요약
 

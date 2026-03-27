@@ -237,6 +237,64 @@ describe("evaluateComplexityWithLLM", () => {
     expect(decision.target).toBe("local");
   });
 
+  it("p95 + error rate 판단 기준 요청은 advanced 응답이어도 mini 로 보정한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: '{"level":"advanced","reason":"운영 지표 판단 기준 설계"}' }],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "latency p95와 error rate를 함께 보는 판단 기준을 제안해줘.",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.level).toBe("complex");
+    expect(decision.target).toBe("mini");
+  });
+
+  it("짧은 기술 설명 요청은 moderate 응답이어도 local 로 보정한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: '{"level":"moderate","reason":"기술 용어 설명"}' }],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "nano 모델이 어떤 역할인지 짧게 말해줘.",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.level).toBe("simple");
+    expect(decision.target).toBe("local");
+  });
+
   it("OpenAI chat completions usage 도 trace 에 남긴다", async () => {
     const traces: EvaluationTrace[] = [];
     vi.mocked(fetch).mockResolvedValueOnce(

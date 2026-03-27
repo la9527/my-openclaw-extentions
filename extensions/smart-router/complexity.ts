@@ -69,6 +69,8 @@ export interface EvaluationContext {
   previousTarget?: RouteTarget;
 }
 
+const COMPLEXITY_ORDER: ComplexityLevel[] = ["simple", "moderate", "complex", "advanced"];
+
 // ---------------------------------------------------------------------------
 // Scoring constants
 // ---------------------------------------------------------------------------
@@ -257,6 +259,58 @@ function countAdvancedSignals(text: string, context?: EvaluationContext): number
   return Math.min(signals, 4);
 }
 
+function clampLevel(level: ComplexityLevel, minimum: ComplexityLevel, maximum: ComplexityLevel): ComplexityLevel {
+  const levelIdx = COMPLEXITY_ORDER.indexOf(level);
+  const minimumIdx = COMPLEXITY_ORDER.indexOf(minimum);
+  const maximumIdx = COMPLEXITY_ORDER.indexOf(maximum);
+
+  if (levelIdx < minimumIdx) {
+    return minimum;
+  }
+
+  if (levelIdx > maximumIdx) {
+    return maximum;
+  }
+
+  return level;
+}
+
+function calibrateLlmLevel(
+  level: ComplexityLevel,
+  message: string,
+  context: EvaluationContext | undefined,
+  remoteThreshold: ComplexityLevel,
+): ComplexityLevel {
+  const ruleDecision = evaluateComplexity(message, context, remoteThreshold);
+  const advancedSignals = countAdvancedSignals(message, context);
+  const lower = message.toLowerCase();
+  const messageChars = message.trim().length;
+
+  const isShortTechnicalExplanation =
+    messageChars <= 80 &&
+    ruleDecision.score.breakdown.code === 0 &&
+    ruleDecision.score.breakdown.tools === 0 &&
+    ruleDecision.score.breakdown.depth === 0 &&
+    /(모델|model|config|설정|옵션|키|jsonl|threshold|route|라우트|tool exposure|tool schema|nano|mini|full|local)/i.test(message) &&
+    /(역할|뜻|의미|무엇|뭐야|설명|한 줄|한 문장|짧게|간단히|what is|meaning|role)/i.test(message) &&
+    !/(비교|compare|설계|design|분석|analy[sz]e|debug|리팩토링|threshold 조정|p95|error rate|경보|alert)/i.test(message);
+
+  const isSingleMetricDecisionPrompt =
+    advancedSignals < 2 &&
+    /(p95|error rate|latency|false positive|false negative|threshold|임계값|경보 조건|alert)/i.test(lower) &&
+    !/(runbook|rollout|migration|fallback policy|threat model|capacity planning|governance|compliance|end-to-end|검증 계획|실험 설계|운영 정책)/i.test(lower);
+
+  if (isShortTechnicalExplanation) {
+    return "simple";
+  }
+
+  if (level === "advanced" && isSingleMetricDecisionPrompt) {
+    return clampLevel(ruleDecision.level, "complex", "complex");
+  }
+
+  return level;
+}
+
 // ---------------------------------------------------------------------------
 // Main evaluation
 // ---------------------------------------------------------------------------
@@ -385,13 +439,16 @@ Respond ONLY with a JSON object (no markdown, no explanation) in this exact form
 Classification criteria:
 - simple: 인사, 간단한 질문, 번역, 날씨, 단답형 (예: "안녕", "오늘 날씨", "고마워")
 - moderate: 일반 지식 질문, 요약, 간단한 설명 요청 (예: "파이썬이 뭐야?", "docker 명령어 알려줘")
-- complex: 코드 작성/분석, 설계, 디버깅, 다단계 작업, 비교 분석 (예: "이 코드 리팩토링해줘", "아키텍처 설계해줘")
+- complex: 코드 작성/분석, 설계, 디버깅, 다단계 작업, 비교 분석, 단일 운영 기준/메트릭 판단 요청 (예: "이 코드 리팩토링해줘", "아키텍처 설계해줘", "p95와 error rate 판단 기준 제안해줘")
 - advanced: 대규모 코드베이스 분석, 복합 시스템 설계, 연구 수준 분석, 여러 도구 연동, 운영 정책/KPI/경보/실험 설계, 마이그레이션·fallback·runbook·trade-off를 함께 다루는 요청 (예: "마이크로서비스 전체 설계와 롤아웃 전략", "운영 KPI/경보 기준과 fallback 정책을 표로 설계")
 
 Guardrails:
 - Do NOT classify as advanced just because the request is technical or mentions terms like false positive, p95, error rate, alert, schema, or metrics.
+- Short technical explanation requests like "nano 모델 역할", "threshold 뜻", "JSONL이 뭐야" are usually simple, not moderate or advanced.
 - A single-topic explanation, checklist, or "3가지 제안" style answer is usually moderate.
+- A short request that asks the meaning or role of one model, one config key, or one technical term should stay simple/local unless it also asks for design, comparison, debugging, or multi-step planning.
 - Designing one component or one policy without rollout/runbook/governance/validation scope is usually complex, not advanced.
+- Requests about one metric pair or one decision criterion, such as "p95와 error rate 판단 기준", are usually complex, not advanced.
 - Classify as advanced only when the request is system-wide or end-to-end and combines at least two of the following: KPI/alerts, fallback/rollout/runbook, migration/governance/compliance, failure-mode/threat-model/capacity-planning, validation/experiment plan.
 
 If the user asks for decision criteria, validation plan, KPI/alert policy, migration strategy, rollout/runbook, or end-to-end operational design together, prefer advanced over complex.
@@ -687,15 +744,16 @@ export async function evaluateComplexityWithLLM(
       return fallbackDecision;
     }
 
-    const reason = parsed.reason ?? level;
+    const calibratedLevel = calibrateLlmLevel(level, message, context, remoteThreshold);
+    const reason = parsed.reason ?? calibratedLevel;
 
     // 규칙 기반 점수도 참고용으로 계산 (로그에 사용)
     const ruleDecision = evaluateComplexity(message, context, remoteThreshold);
 
-    const target = routeTargetFromLevel(level, remoteThreshold);
+    const target = routeTargetFromLevel(calibratedLevel, remoteThreshold);
 
     const decision = {
-      level,
+      level: calibratedLevel,
       score: ruleDecision.score, // 참고용 규칙 점수 유지
       target,
       reason: `[LLM] ${reason}`,
@@ -710,7 +768,7 @@ export async function evaluateComplexityWithLLM(
       promptChars,
       usage,
       httpStatus: response.status,
-      classifierLevel: level,
+      classifierLevel: calibratedLevel,
       classifierReason: reason,
       finalTarget: target,
       fallbackToRule: false,
