@@ -11,9 +11,9 @@ import {
 } from "./complexity.js";
 
 describe("routeTargetFromLevel", () => {
-  it("기본 threshold=moderate 에서 local/nano/mini/full 매핑을 적용한다", () => {
+  it("기본 threshold=moderate 에서 local/mini/full 기본 매핑을 적용한다", () => {
     expect(routeTargetFromLevel("simple")).toBe("local");
-    expect(routeTargetFromLevel("moderate")).toBe("nano");
+    expect(routeTargetFromLevel("moderate")).toBe("mini");
     expect(routeTargetFromLevel("complex")).toBe("mini");
     expect(routeTargetFromLevel("advanced")).toBe("full");
   });
@@ -36,10 +36,22 @@ describe("evaluateComplexity", () => {
     expect(decision.target).toBe("local");
   });
 
-  it("중간 길이 설명 요청은 기본적으로 nano tier 로 간다", () => {
+  it("중간 길이 설명 요청은 기본적으로 mini tier 로 간다", () => {
     const decision = evaluateComplexity("파이썬에 대해 단계별로 간단히 설명해줘".padEnd(260, " "));
     expect(decision.level).toBe("moderate");
+    expect(decision.target).toBe("mini");
+  });
+
+  it("짧고 경량인 비교 요약 요청은 nano tier 로 보낸다", () => {
+    const decision = evaluateComplexity(
+      "Redis LRU와 LFU 차이를 한 문단으로 간단히 비교해줘. 각각 언제 쓰는지 핵심만 빠르게 정리해주고, 마지막에 한 줄 요약도 붙여줘."
+        .padEnd(220, " "),
+      { turnCount: 4 },
+    );
+
+    expect(decision.level).toBe("moderate");
     expect(decision.target).toBe("nano");
+    expect(decision.reason).toContain("경량 remote 질의");
   });
 
   it("코드 리팩토링 요청은 mini tier 로 간다", () => {
@@ -101,7 +113,7 @@ describe("evaluateComplexity", () => {
     );
 
     expect(decision.level).toBe("moderate");
-    expect(decision.target).toBe("nano");
+    expect(decision.target).toBe("mini");
   });
 
   it("score breakdown 을 계산한다", () => {
@@ -186,7 +198,7 @@ describe("evaluateComplexityWithLLM", () => {
     });
   });
 
-  it("threshold=moderate 에서 moderate 분류는 nano tier 로 간다", async () => {
+  it("threshold=moderate 에서 일반 moderate 분류는 mini tier 로 간다", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -206,6 +218,34 @@ describe("evaluateComplexityWithLLM", () => {
       "http://localhost:1235/v1",
       "gpt-5.4-nano-2026-03-17",
       undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.target).toBe("mini");
+  });
+
+  it("경량 비교 요약 요청은 moderate 분류여도 nano tier 로 유지한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: '{"level":"moderate","reason":"짧은 비교 요약 요청"}' }],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "Redis LRU와 LFU 차이를 한 문단으로 간단히 비교해줘. 핵심만 빠르게 정리해줘.",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      { turnCount: 4 },
       "moderate",
       5000,
       "openai-responses",
@@ -254,6 +294,35 @@ describe("evaluateComplexityWithLLM", () => {
 
     const decision = await evaluateComplexityWithLLM(
       "latency p95와 error rate를 함께 보는 판단 기준을 제안해줘.",
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      5000,
+      "openai-responses",
+    );
+
+    expect(decision.level).toBe("complex");
+    expect(decision.target).toBe("mini");
+  });
+
+  it("alert-only 운영 요청은 advanced 응답이어도 complex/mini 로 보정한다", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: '{"level":"advanced","reason":"경보 정책 설계"}' }],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const decision = await evaluateComplexityWithLLM(
+      "smart-router 일일 리포트에서 바로 경보로 연결할 조건 3개만 정리해줘.",
       "http://localhost:1235/v1",
       "gpt-5.4-nano-2026-03-17",
       undefined,
@@ -421,6 +490,30 @@ describe("evaluateComplexityWithLLM", () => {
     );
 
     expect(decision).toEqual(evaluateComplexity("안녕하세요", undefined, "moderate"));
+  });
+
+  it("LLM 타임아웃이면 고급 신호를 보존한 fallback 을 사용한다", async () => {
+    const traces: EvaluationTrace[] = [];
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("abort"));
+
+    const message = "smart-router rollout 순서와 runbook만 짧게 정리해줘.";
+    const decision = await evaluateComplexityWithLLM(
+      message,
+      "http://localhost:1235/v1",
+      "gpt-5.4-nano-2026-03-17",
+      undefined,
+      "moderate",
+      1,
+      "openai-responses",
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(decision.level).toBe("advanced");
+    expect(decision.target).toBe("full");
+    expect(decision.reason).toContain("타임아웃 fallback 보정");
+    expect(traces[0]?.fallbackToRule).toBe(true);
+    expect(traces[0]?.finalTarget).toBe("full");
   });
 
   it("OpenAI 요청 body 는 고정 파라미터를 포함한다", async () => {

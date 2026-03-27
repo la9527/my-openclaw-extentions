@@ -8,7 +8,8 @@
  *   2. resolveDynamicModel 훅에서 로컬 Ollama 모델 정의를 반환한다.
  *   3. wrapStreamFn 훅에서 메시지 복잡도를 분석하여:
  *      - 단순 → 로컬 LLM
- *      - 보통 → nano
+ *      - 보통 → mini
+ *      - 경량 비교/요약 → nano
  *      - 복잡 → mini
  *      - 고급 → full
  *   4. /route, /local, /remote 슬래시 명령을 등록한다.

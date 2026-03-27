@@ -39,8 +39,8 @@
 기존 구조를 아래 4-tier로 정리했다.
 
 1. `simple -> local`
-2. `moderate -> nano`
-3. `complex -> mini`
+2. `moderate -> mini` 를 기본 remote 경로로 사용
+3. 짧고 경량인 비교/요약 요청만 선택적으로 `nano`
 4. `advanced -> full`
 
 직접 선택 모델도 함께 제공한다.
@@ -82,6 +82,8 @@ tool schema가 prompt 비용을 크게 키는 문제를 줄이기 위해 아래 
 1. KPI, rollout, runbook, fallback, threat model, capacity planning 같은 운영 설계 신호는 `advanced/full` 쪽으로 더 잘 올라가도록 강화
 2. `p95 + error rate` 같은 단일 metric 판단 요청은 `advanced` 과승격을 막고 `complex/mini` 쪽으로 낮추는 calibration 추가
 3. `nano 모델 역할`, `threshold 뜻` 같은 짧은 기술 설명 질의는 `simple/local` 쪽으로 낮추는 calibration 추가
+4. `경보 조건 3개` 같은 alert-only 운영 요청은 `complex/mini` 쪽으로 낮추는 guardrail 추가
+5. LLM timeout 시 짧은 고급 운영 설계 질의가 `local` 로 떨어지지 않도록 fallback floor 추가
 
 ## 현재 기본 모델 구성
 
@@ -119,11 +121,11 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 초기 검증에서 아래는 확인됐다.
 
 1. `simple -> local`
-2. `moderate -> nano`
-3. `complex -> mini`
+2. 일반 `moderate -> mini`
+3. 선택적 경량 `moderate -> nano`
 4. direct `local/nano/mini/full` 모델 선택 모두 정상 동작
 
-### 2. nano는 moderate 기본 tier로 확정하기 어렵다
+### 2. nano는 moderate 기본 tier로 확정하지 않는 쪽이 맞다
 
 같은 moderate 성격 프롬프트 8개를 direct selection으로 비교했을 때:
 
@@ -132,7 +134,7 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 
 `nano` 쪽에 큰 outlier가 한 번 있었지만, 중앙값 기준으로 봐도 `mini`가 더 빨랐다.
 
-즉, 현재 환경에서는 일반 remote 기본 tier는 여전히 `mini`가 더 안정적이다.
+즉, 현재 환경에서는 일반 remote 기본 tier는 여전히 `mini`가 더 안정적이다. 현재 코드도 이 결론에 맞춰 `moderate` 기본 target 을 `mini`로 두고, 짧고 경량인 비교/요약 요청에만 `nano`를 선택적으로 사용하도록 정리했다.
 
 ### 3. advanced/full 강화는 성공했지만, LLM classifier는 과승격 위험이 있었다
 
@@ -147,7 +149,7 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 2. classifier prompt가 운영/지표 관련 표현을 과하게 `advanced`로 해석하는 경우가 있었다.
 3. timeout 시 rule fallback이 짧은 advanced 프롬프트를 충분히 보존하지 못하는 경우가 있었다.
 
-### 4. 후속 calibration으로 일부 문제는 해결
+### 4. 후속 calibration과 정책 보정으로 주요 문제를 줄였다
 
 최종 추가 검증(`sr-calib-20260327-233246-*`)에서 확인된 결과:
 
@@ -155,10 +157,12 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 2. `nano 모델이 어떤 역할인지 짧게 말해줘` → `simple/local`
 3. `threshold 뜻을 한 문장으로 설명해줘` → `simple/local`
 
-즉, 이번 마감 시점 기준으로 아래 두 문제는 해결된 상태다.
+즉, 이번 마감 시점 기준으로 아래 문제들은 코드 정책상 해결된 상태다.
 
 1. `p95 + error rate` 류 단일 metric 요청의 과승격
 2. 짧은 기술 설명 질의의 과원격화
+3. alert-only 운영 요청의 `advanced/full` 과승격
+4. LLM timeout 시 짧은 고급 운영 요청의 과도한 하향 fallback
 
 ## 현재 시점의 정책 결론
 
@@ -175,6 +179,7 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 1. 저비용 remote tier
 2. 분류용 evaluation 모델
 3. local 상태가 나쁠 때의 1차 fallback 후보
+4. 짧고 경량인 비교/요약 요청 전용 tier
 
 ### 3. `llm` 분류는 쓸 수 있지만 guardrail이 필수
 
@@ -188,20 +193,20 @@ pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 
 당장 운영 안정성을 우선하면 아래 방향이 가장 무난하다.
 
-1. 기본 정책은 현재 구조 유지
-2. 일반 remote 균형점은 `mini` 중심으로 본다
-3. `nano`는 경량 remote 또는 evaluation 용도로 본다
-4. `llm` 평가는 유지하되 calibration을 계속 붙인다
+1. 기본 정책은 `mini` 중심 remote 경로 유지
+2. `nano`는 경량 remote 또는 evaluation 용도로 제한한다
+3. `llm` 평가는 유지하되 calibration과 timeout fallback floor를 함께 둔다
+4. alert-only 운영 요청은 `complex/mini` 쪽에서 소화한다
 
 ## 아직 남은 이슈
 
 이번 작업 기준으로 아직 남아 있는 대표 이슈는 아래다.
 
-1. `경보 조건 3개` 같은 alert-only 짧은 운영 요청은 아직 `advanced/full` 로 갈 수 있다.
-2. timeout fallback 품질은 더 확인할 필요가 있다.
-3. local usage는 여전히 일부 구간에서 추정치 의존이 남아 있다.
+1. 새 alert-only guardrail 과 timeout fallback floor 는 실호출 재검증이 더 필요하다.
+2. local usage는 여전히 일부 구간에서 추정치 의존이 남아 있다.
+3. `nano` 선택 조건은 실제 트래픽에서 더 좁히거나 넓힐 여지가 있다.
 
-즉, 남은 다음 튜닝 포인트는 `alert-only` 성격의 짧은 운영 요청을 `complex/mini` 쪽으로 더 안정적으로 낮추는 것이다.
+즉, 남은 다음 튜닝 포인트는 새 정책을 실호출 배치로 다시 검증하고 `nano` 선택 조건을 더 다듬는 것이다.
 
 ## 관련 문서
 

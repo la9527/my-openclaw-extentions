@@ -295,6 +295,14 @@ function calibrateLlmLevel(
     /(역할|뜻|의미|무엇|뭐야|설명|한 줄|한 문장|짧게|간단히|what is|meaning|role)/i.test(message) &&
     !/(비교|compare|설계|design|분석|analy[sz]e|debug|리팩토링|threshold 조정|p95|error rate|경보|alert)/i.test(message);
 
+  const isAlertOnlyOperationalPrompt =
+    advancedSignals < 3 &&
+    ruleDecision.score.breakdown.code === 0 &&
+    ruleDecision.score.breakdown.tools <= 1 &&
+    /(alert|경보|알림)/i.test(lower) &&
+    /(조건|기준|룰|rule|3개|세 가지|세개|몇 개|체크리스트|정리)/i.test(lower) &&
+    !/(runbook|rollout|migration|fallback policy|fallback|threat model|capacity planning|governance|compliance|end-to-end|검증 계획|실험 설계|운영 정책|로드맵|아키텍처|architecture|전체 시스템)/i.test(lower);
+
   const isSingleMetricDecisionPrompt =
     advancedSignals < 2 &&
     /(p95|error rate|latency|false positive|false negative|threshold|임계값|경보 조건|alert)/i.test(lower) &&
@@ -304,11 +312,93 @@ function calibrateLlmLevel(
     return "simple";
   }
 
+  if (level === "advanced" && isAlertOnlyOperationalPrompt) {
+    return clampLevel(ruleDecision.level, "complex", "complex");
+  }
+
   if (level === "advanced" && isSingleMetricDecisionPrompt) {
     return clampLevel(ruleDecision.level, "complex", "complex");
   }
 
   return level;
+}
+
+function shouldPreferNanoForModerate(
+  message: string,
+  context: EvaluationContext | undefined,
+  decision: Pick<RoutingDecision, "score">,
+): boolean {
+  const lower = message.toLowerCase();
+  const messageChars = message.trim().length;
+  const advancedSignals = countAdvancedSignals(message, context);
+  const isBrevityConstrained = /(짧게|간단히|간략히|한 문단|한두 문장|한 문장|세 줄|5문장|핵심만|요약만|빠르게|brief|short|quick)/i.test(lower);
+  const isLightweightExplainOrCompare = /(설명|요약|정리|개요|compare|비교|차이|difference|overview|summary)/i.test(lower);
+
+  return (
+    messageChars >= 40 &&
+    messageChars <= 220 &&
+    decision.score.breakdown.code === 0 &&
+    decision.score.breakdown.tools === 0 &&
+    decision.score.breakdown.depth <= 1 &&
+    advancedSignals === 0 &&
+    isBrevityConstrained &&
+    isLightweightExplainOrCompare &&
+    !/(alert|경보|p95|error rate|threshold|임계값|runbook|rollout|migration|fallback|threat model|capacity planning)/i.test(lower)
+  );
+}
+
+function resolveRouteTarget(
+  level: ComplexityLevel,
+  message: string,
+  context: EvaluationContext | undefined,
+  remoteThreshold: ComplexityLevel,
+  decision: Pick<RoutingDecision, "score">,
+): RouteTarget {
+  const baseTarget = routeTargetFromLevel(level, remoteThreshold);
+
+  if (level === "moderate" && baseTarget !== "local" && shouldPreferNanoForModerate(message, context, decision)) {
+    return "nano";
+  }
+
+  return baseTarget;
+}
+
+function preserveTimeoutFallbackDecision(
+  decision: RoutingDecision,
+  message: string,
+  context: EvaluationContext | undefined,
+  remoteThreshold: ComplexityLevel,
+): RoutingDecision {
+  const lower = message.toLowerCase();
+  const advancedSignals = countAdvancedSignals(message, context);
+  const hasStrategicScope = /(runbook|rollout|migration|fallback|threat model|capacity planning|governance|compliance|end-to-end|검증 계획|실험 설계|운영 정책|로드맵|아키텍처|전체 시스템)/i.test(lower);
+
+  let preservedLevel = decision.level;
+
+  if (advancedSignals >= 3 && hasStrategicScope) {
+    preservedLevel = "advanced";
+  } else if (decision.target === "local" && remoteThreshold !== "advanced" && advancedSignals >= 2) {
+    preservedLevel = "complex";
+  }
+
+  if (preservedLevel === decision.level) {
+    return decision;
+  }
+
+  const preservedTarget = resolveRouteTarget(preservedLevel, message, context, remoteThreshold, decision);
+  const preservedTotal = preservedLevel === "advanced"
+    ? Math.max(decision.score.total, THRESHOLD_ADVANCED)
+    : Math.max(decision.score.total, THRESHOLD_COMPLEX);
+
+  return {
+    level: preservedLevel,
+    score: {
+      total: preservedTotal,
+      breakdown: decision.score.breakdown,
+    },
+    target: preservedTarget,
+    reason: `${decision.reason}, 타임아웃 fallback 보정`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +426,7 @@ export function routeTargetFromLevel(
     case "simple":
       return "local";
     case "moderate":
-      return "nano";
+      return "mini";
     case "complex":
       return "mini";
     case "advanced":
@@ -395,7 +485,8 @@ export function evaluateComplexity(
     (hasHeavyAdvancedBundle && (breakdown.length >= 2 || breakdown.code >= 1 || breakdown.tools >= 1 || breakdown.depth >= 1));
   const effectiveTotal = shouldPromoteToAdvanced ? Math.max(total, THRESHOLD_ADVANCED) : total;
   const level = levelFromScore(effectiveTotal);
-  const target = routeTargetFromLevel(level, remoteThreshold);
+  const score = { total: effectiveTotal, breakdown };
+  const target = resolveRouteTarget(level, message, context, remoteThreshold, { score });
 
   const reasons: string[] = [];
   if (breakdown.code >= 2) reasons.push("코드 분석 필요");
@@ -404,11 +495,12 @@ export function evaluateComplexity(
   if (breakdown.length >= 3) reasons.push("장문 입력");
   if (breakdown.keywords >= 2) reasons.push("복잡한 작업 키워드");
   if (shouldPromoteToAdvanced) reasons.push("고급 설계/운영 신호");
+  if (level === "moderate" && target === "nano") reasons.push("경량 remote 질의");
   if (reasons.length === 0) reasons.push(target === "local" ? "단순 질의" : "복합 요청");
 
   return {
     level,
-    score: { total: effectiveTotal, breakdown },
+    score,
     target,
     reason: reasons.join(", "),
   };
@@ -750,7 +842,7 @@ export async function evaluateComplexityWithLLM(
     // 규칙 기반 점수도 참고용으로 계산 (로그에 사용)
     const ruleDecision = evaluateComplexity(message, context, remoteThreshold);
 
-    const target = routeTargetFromLevel(calibratedLevel, remoteThreshold);
+    const target = resolveRouteTarget(calibratedLevel, message, context, remoteThreshold, ruleDecision);
 
     const decision = {
       level: calibratedLevel,
@@ -777,7 +869,9 @@ export async function evaluateComplexityWithLLM(
     return decision;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    const fallbackDecision = evaluateComplexity(message, context, remoteThreshold);
+    const fallbackDecision = errMsg.includes("abort")
+      ? preserveTimeoutFallbackDecision(evaluateComplexity(message, context, remoteThreshold), message, context, remoteThreshold)
+      : evaluateComplexity(message, context, remoteThreshold);
     if (errMsg.includes("abort")) {
       console.warn(`[smart-router] LLM 평가 타임아웃 (${timeoutMs}ms), 규칙 기반으로 fallback`);
     } else {
