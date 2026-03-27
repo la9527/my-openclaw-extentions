@@ -102,6 +102,22 @@ pnpm exec vitest run complexity.test.ts index.test.ts
 
 - 상세 플러그인 설명: [extensions/smart-router/README.md](extensions/smart-router/README.md)
 
+## AI 작업용 customization
+
+이 저장소에는 이후 AI 작업 품질을 높이기 위한 repo-local instruction 과 skill 을 함께 둡니다.
+
+- 항상 적용되는 기본 규칙: `.github/copilot-instructions.md`
+- 라우팅 정책 변경 workflow: `.agents/skills/smart-router-routing-tuning/SKILL.md`
+- 실런타임 검증 workflow: `.agents/skills/smart-router-runtime-validation/SKILL.md`
+- 로그/실험 분석 workflow: `.agents/skills/smart-router-log-analysis/SKILL.md`
+
+이 파일들은 smart-router 작업 시 아래 정보를 다시 찾는 비용을 줄이기 위한 목적입니다.
+
+- 현재 4-tier 운영 기준
+- `nano` 와 `mini` 역할 구분
+- 글로벌 OpenClaw runtime 과 source repo 차이
+- 테스트 및 실호출 검증 절차
+
 ## 검증 상태
 
 현재 확인된 항목:
