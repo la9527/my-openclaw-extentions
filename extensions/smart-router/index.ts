@@ -81,6 +81,7 @@ const DEFAULTS = {
   logPreviewChars: 240,
   logRetentionDays: 10,
   toolExposureMode: "conservative" as ToolExposureMode,
+  localForceNoTools: false,
   latencyAwareRouting: true,
   localLatencyP95ThresholdMs: 12_000,
   localErrorRateThreshold: 0.25,
@@ -179,6 +180,7 @@ function resolveConfig(pluginConfig?: Record<string, unknown>) {
     logPreviewChars: Number(pluginConfig?.logPreviewChars ?? DEFAULTS.logPreviewChars),
     logRetentionDays: Number(pluginConfig?.logRetentionDays ?? DEFAULTS.logRetentionDays),
     toolExposureMode: (pluginConfig?.toolExposureMode as ToolExposureMode | undefined) ?? DEFAULTS.toolExposureMode,
+    localForceNoTools: Boolean(pluginConfig?.localForceNoTools ?? DEFAULTS.localForceNoTools),
     latencyAwareRouting:
       typeof pluginConfig?.latencyAwareRouting === "boolean"
         ? pluginConfig.latencyAwareRouting
@@ -462,6 +464,7 @@ function applyToolExposurePolicy(
   message: string,
   evalContext: EvaluationContext,
   mode: ToolExposureMode,
+  forceLocalPrune = false,
 ): {
   context: unknown;
   applied: boolean;
@@ -479,10 +482,12 @@ function applyToolExposurePolicy(
   }
 
   const explicitToolIntent = hasExplicitToolIntent(message) || Boolean(evalContext.hasToolUse);
+  // forceLocalPrune: localForceNoTools=true 일 때 local 라우트는 hasToolUse 여부에 관계없이 항상 도구를 제거
   const shouldPrune =
-    !explicitToolIntent &&
-    ((mode === "conservative" && routeTier === "local") ||
-      (mode === "minimal" && (routeTier === "local" || routeTier === "nano")));
+    (forceLocalPrune && routeTier === "local") ||
+    (!explicitToolIntent &&
+      ((mode === "conservative" && routeTier === "local") ||
+        (mode === "minimal" && (routeTier === "local" || routeTier === "nano"))));
 
   if (!shouldPrune) {
     return {
@@ -857,6 +862,7 @@ export default definePluginEntry({
             lastMessage,
             evalContext,
             pluginConfig.toolExposureMode,
+            pluginConfig.localForceNoTools,
           );
           const requestLogger = executionLogger.createRequest({
             requestedModelId: requestedModelId ?? String((model as Record<string, unknown>)?.id ?? "unknown"),

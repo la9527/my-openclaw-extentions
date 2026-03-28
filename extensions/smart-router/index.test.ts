@@ -106,6 +106,20 @@ describe("smart-router route metadata", () => {
     expect(result.retainedToolCount).toBe(0);
   });
 
+  it("forceLocalPrune removes tools for local even when hasToolUse is true", () => {
+    const result = __testing.applyToolExposurePolicy(
+      { tools: [{ name: "read" }, { name: "write" }] },
+      "local",
+      "안녕, 한 줄로 답해줘",
+      { hasToolUse: true },
+      "conservative",
+      true, // forceLocalPrune
+    );
+
+    expect(result.applied).toBe(true);
+    expect(result.retainedToolCount).toBe(0);
+  });
+
   it("escalates local routing when p95 latency is too high", () => {
     const reason = __testing.shouldEscalateLocalRoute(
       { sampleCount: 4, errorCount: 0, errorRate: 0, p95Ms: 16000 },

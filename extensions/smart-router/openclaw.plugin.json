@@ -122,6 +122,10 @@
         "enum": ["full", "conservative", "minimal"],
         "description": "tool schema 노출 정책. full=항상 전체, conservative=local 경로만 축소, minimal=local/nano 경로를 더 적극 축소"
       },
+      "localForceNoTools": {
+        "type": "boolean",
+        "description": "local 라우팅 시 세션 도구 사용 이력과 무관하게 항상 tool schema를 제거. tools를 지원하지 않는 Ollama 모델 사용 시 true로 설정. 기본: false"
+      },
       "latencyAwareRouting": {
         "type": "boolean",
         "description": "최근 local latency/error rate를 보고 local 대신 nano로 1차 승격할지 여부. 기본: true"
