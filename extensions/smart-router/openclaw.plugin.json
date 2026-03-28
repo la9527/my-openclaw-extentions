@@ -78,8 +78,8 @@
       },
       "evaluationLlmTarget": {
         "type": "string",
-        "enum": ["nano", "mini", "full"],
-        "description": "llm 평가 모드에서 사용할 분류 모델 tier. 기본: nano"
+        "enum": ["local", "nano", "mini", "full"],
+        "description": "llm 평가 모드에서 사용할 분류 모델 tier. local을 주면 localModel/localBaseUrl 경로로 분류 요청을 보낸다. 기본: nano"
       },
       "evaluationLlmModel": {
         "type": "string",
@@ -87,7 +87,24 @@
       },
       "evaluationTimeoutMs": {
         "type": "number",
-        "description": "LLM 평가 타임아웃 (ms). 초과 시 rule 기반으로 fallback. 기본: 10000"
+        "description": "LLM 평가 타임아웃 (ms). 초과 시 rule 기반으로 fallback. 기본: 15000"
+      },
+      "evaluationTimeoutRetryCount": {
+        "type": "number",
+        "description": "LLM 평가 타임아웃 발생 시 재시도 횟수. 기본: 1"
+      },
+      "evaluationTimeoutFallbackTarget": {
+        "type": "string",
+        "enum": ["nano", "mini", "full"],
+        "description": "LLM 평가 timeout이 3초 미만인 경우에만 적용되는 fallback remote tier. timeout 3초 이상은 full, 연결/HTTP/JSON 실패는 nano로 고정된다. 기본: nano"
+      },
+      "streamFirstTokenTimeoutMs": {
+        "type": "number",
+        "description": "실제 생성 스트림에서 첫 토큰 대기 타임아웃 (ms). 초과 시 상위 tier로 1회 재시도. 기본: 15000"
+      },
+      "streamRetryOnFailure": {
+        "type": "boolean",
+        "description": "생성 단계에서 즉시 response_error 또는 first-token timeout 발생 시 상위 tier로 1회 재시도할지 여부. 기본: true"
       },
       "showModelLabel": {
         "type": "boolean",

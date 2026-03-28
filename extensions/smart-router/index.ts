@@ -57,6 +57,7 @@ type ProviderApiType = "ollama" | "openai-responses" | "openai-completions" | "o
 // ---------------------------------------------------------------------------
 
 const PROVIDER_ID = "smart-router";
+const CLASSIFIER_TIMEOUT_FULL_THRESHOLD_MS = 3_000;
 
 /** 플러그인 설정 기본값 */
 const DEFAULTS = {
@@ -72,8 +73,12 @@ const DEFAULTS = {
   remoteApi: "openai-responses" as const,
   threshold: "moderate" as ComplexityLevel,
   evaluationMode: "rule" as EvaluationMode,
-  evaluationLlmTarget: "nano" as Exclude<RouteTarget, "local">,
+  evaluationLlmTarget: "nano" as RouteTarget,
   evaluationTimeoutMs: 15_000,
+  evaluationTimeoutRetryCount: 1,
+  evaluationTimeoutFallbackTarget: "nano" as Exclude<RouteTarget, "local">,
+  streamFirstTokenTimeoutMs: 15_000,
+  streamRetryOnFailure: true,
   showModelLabel: true,
   logEnabled: true,
   logPayloadBody: false,
@@ -111,6 +116,14 @@ type SmartRouterRouteMeta = {
   resolvedModel?: string;
 };
 
+type EvaluationRequestConfig = {
+  targetTier: RouteTarget;
+  model: string;
+  baseUrl: string;
+  apiType: LocalApiType;
+  apiKey?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -119,6 +132,18 @@ type SmartRouterRouteMeta = {
 function toProviderApi(localApi: string): ProviderApiType {
   if (localApi === "ollama") return "ollama";
   return "openai-completions";
+}
+
+function toBootstrapApi(localApi: string): ProviderApiType {
+  // Keep the bootstrap model transport-neutral so runtime wrappers can
+  // switch per-route at stream time (local vs remote).
+  if (localApi === "ollama") return "openai-completions";
+  return toProviderApi(localApi);
+}
+
+function resolveOllamaChatUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  return `${trimmed.replace(/\/v1$/i, "")}/api/chat`;
 }
 
 function resolveRouterApiKey(): string {
@@ -151,12 +176,28 @@ function resolveConfig(pluginConfig?: Record<string, unknown>) {
     threshold: (pluginConfig?.threshold as ComplexityLevel) ?? DEFAULTS.threshold,
     evaluationMode: (pluginConfig?.evaluationMode as EvaluationMode) ?? DEFAULTS.evaluationMode,
     evaluationLlmTarget:
-      (pluginConfig?.evaluationLlmTarget as Exclude<RouteTarget, "local"> | undefined) ??
+      (pluginConfig?.evaluationLlmTarget as RouteTarget | undefined) ??
       DEFAULTS.evaluationLlmTarget,
     evaluationLlmModel: pluginConfig?.evaluationLlmModel
       ? String(pluginConfig.evaluationLlmModel)
       : undefined,
     evaluationTimeoutMs: Number(pluginConfig?.evaluationTimeoutMs ?? DEFAULTS.evaluationTimeoutMs),
+    evaluationTimeoutRetryCount: Math.max(
+      0,
+      Number(pluginConfig?.evaluationTimeoutRetryCount ?? DEFAULTS.evaluationTimeoutRetryCount),
+    ),
+    evaluationTimeoutFallbackTarget:
+      (pluginConfig?.evaluationTimeoutFallbackTarget as Exclude<RouteTarget, "local"> | undefined) ??
+      DEFAULTS.evaluationTimeoutFallbackTarget,
+    streamFirstTokenTimeoutMs: Number(
+      pluginConfig?.streamFirstTokenTimeoutMs ?? DEFAULTS.streamFirstTokenTimeoutMs,
+    ),
+    streamRetryOnFailure:
+      typeof pluginConfig?.streamRetryOnFailure === "boolean"
+        ? pluginConfig.streamRetryOnFailure
+        : pluginConfig?.streamRetryOnFailure === undefined
+          ? DEFAULTS.streamRetryOnFailure
+          : String(pluginConfig.streamRetryOnFailure).toLowerCase() === "true",
     showModelLabel:
       typeof pluginConfig?.showModelLabel === "boolean"
         ? pluginConfig.showModelLabel
@@ -202,7 +243,7 @@ function resolveRouteModel(config: ResolvedConfig, target: RouteTarget): RouteMo
       provider: PROVIDER_ID,
       model: config.localModel,
       baseUrl: config.localBaseUrl,
-      api: toProviderApi(config.localApi as string),
+      api: toBootstrapApi(config.localApi as string),
       contextWindow: 32768,
       maxTokens: 8192,
       label: `local:${config.localModel}`,
@@ -224,6 +265,115 @@ function resolveRouteModel(config: ResolvedConfig, target: RouteTarget): RouteMo
     contextWindow: 128000,
     maxTokens: target === "full" ? 32768 : 16384,
     label: `${target}:${modelByTier[target]}`,
+  };
+}
+
+function resolveEvaluationRequestConfig(config: ResolvedConfig): EvaluationRequestConfig {
+  const targetTier = config.evaluationLlmTarget;
+  const model = config.evaluationLlmModel ?? resolveRouteModel(config, targetTier).model;
+
+  if (targetTier === "local") {
+    const apiType: LocalApiType = config.localApi === "ollama" ? "ollama" : "openai";
+    const apiKey = config.localBaseUrl.includes("api.openai.com")
+      ? process.env.OPENAI_API_KEY?.trim()
+      : undefined;
+    return {
+      targetTier,
+      model,
+      baseUrl: config.localBaseUrl,
+      apiType,
+      apiKey,
+    };
+  }
+
+  return {
+    targetTier,
+    model,
+    baseUrl: config.remoteBaseUrl,
+    apiType: config.remoteApi === "openai-responses" ? "openai-responses" : "openai",
+    apiKey: config.remoteBaseUrl.includes("api.openai.com")
+      ? process.env.OPENAI_API_KEY?.trim()
+      : undefined,
+  };
+}
+
+function isClassifierTimeoutError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase();
+  return lower.includes("abort") || lower.includes("timeout") || lower.includes("timed out");
+}
+
+function isClassifierJsonError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase();
+  return lower.includes("invalid level") || lower.includes("json") || lower.includes("parse");
+}
+
+function isClassifierConnectionError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase();
+  return (
+    lower.includes("fetch failed") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("network") ||
+    lower.includes("econnrefused") ||
+    lower.includes("enotfound") ||
+    lower.includes("connection") ||
+    lower.includes("socket")
+  );
+}
+
+type ClassifierFailureFallback = {
+  target: Exclude<RouteTarget, "local">;
+  reason: string;
+};
+
+function resolveClassifierFailureFallback(
+  config: ResolvedConfig,
+  trace?: EvaluationTrace,
+): ClassifierFailureFallback | undefined {
+  if (!trace?.fallbackToRule) {
+    return undefined;
+  }
+
+  const errorMessage = String(trace.error ?? "");
+  const durationMs = Number.isFinite(trace.durationMs) ? Number(trace.durationMs) : 0;
+
+  if (isClassifierTimeoutError(errorMessage)) {
+    if (durationMs >= CLASSIFIER_TIMEOUT_FULL_THRESHOLD_MS) {
+      return {
+        target: "full",
+        reason: `분류 timeout ${Math.round(durationMs)}ms(>=${CLASSIFIER_TIMEOUT_FULL_THRESHOLD_MS}ms) fallback`,
+      };
+    }
+
+    return {
+      target: config.evaluationTimeoutFallbackTarget,
+      reason: "분류 timeout fallback",
+    };
+  }
+
+  if (isClassifierJsonError(errorMessage)) {
+    return {
+      target: "nano",
+      reason: "분류 JSON 파싱 실패 fallback",
+    };
+  }
+
+  if (isClassifierConnectionError(errorMessage)) {
+    return {
+      target: "nano",
+      reason: "분류 연결 실패 fallback",
+    };
+  }
+
+  if (errorMessage.toLowerCase().startsWith("http ")) {
+    return {
+      target: "nano",
+      reason: "분류 HTTP 실패 fallback",
+    };
+  }
+
+  return {
+    target: "nano",
+    reason: "분류 실패 fallback",
   };
 }
 
@@ -364,6 +514,255 @@ function extractLastUserMessage(context: unknown): string {
   // 단순 문자열 prompt
   if (typeof ctx.prompt === "string") return ctx.prompt;
   return "";
+}
+
+function summarizeMessageText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+
+      const typedItem = item as Record<string, unknown>;
+      if (typedItem.type === "text" && typeof typedItem.text === "string") {
+        return typedItem.text;
+      }
+      if (typedItem.type === "input_text" && typeof typedItem.text === "string") {
+        return typedItem.text;
+      }
+      if (typedItem.type === "output_text" && typeof typedItem.text === "string") {
+        return typedItem.text;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function convertContextToOllamaMessages(context: unknown): Array<Record<string, string>> {
+  if (!context || typeof context !== "object") {
+    return [];
+  }
+
+  const typedContext = context as Record<string, unknown>;
+  const messages: Array<Record<string, string>> = [];
+
+  if (typeof typedContext.systemPrompt === "string" && typedContext.systemPrompt.trim()) {
+    messages.push({ role: "system", content: typedContext.systemPrompt });
+  }
+
+  const rawMessages = typedContext.messages;
+  if (!Array.isArray(rawMessages)) {
+    return messages;
+  }
+
+  for (const rawMessage of rawMessages) {
+    if (!rawMessage || typeof rawMessage !== "object") {
+      continue;
+    }
+
+    const typedMessage = rawMessage as Record<string, unknown>;
+    const role = typeof typedMessage.role === "string" ? typedMessage.role : "user";
+    const normalizedRole = role === "toolResult" ? "tool" : role;
+    const content = summarizeMessageText(typedMessage.content);
+    if (!content.trim()) {
+      continue;
+    }
+    messages.push({ role: normalizedRole, content });
+  }
+
+  return messages;
+}
+
+type NativeOllamaChatResponse = {
+  message?: {
+    content?: string;
+  };
+  done?: boolean;
+  done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
+};
+
+async function* parseNativeOllamaNdjson(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): AsyncGenerator<NativeOllamaChatResponse> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      yield JSON.parse(trimmed) as NativeOllamaChatResponse;
+    }
+  }
+
+  const trailing = buffer.trim();
+  if (trailing) {
+    yield JSON.parse(trailing) as NativeOllamaChatResponse;
+  }
+}
+
+function buildNativeOllamaAssistantMessage(
+  route: RouteModelConfig,
+  text: string,
+  stopReason: "stop" | "error",
+  usage?: { input?: number; output?: number },
+): AssistantMessage {
+  return {
+    role: "assistant",
+    provider: route.provider,
+    api: "ollama",
+    model: route.model,
+    stopReason,
+    content: text ? [{ type: "text", text }] : [],
+    usage: {
+      input: usage?.input ?? 0,
+      output: usage?.output ?? 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: (usage?.input ?? 0) + (usage?.output ?? 0),
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    timestamp: Date.now(),
+  } as AssistantMessage;
+}
+
+function createNativeOllamaStream(route: RouteModelConfig, context: unknown, options: unknown): AssistantStream {
+  const stream = createAssistantMessageEventStream();
+  const typedOptions = options && typeof options === "object" ? (options as Record<string, unknown>) : {};
+
+  void (async () => {
+    try {
+      const response = await fetch(resolveOllamaChatUrl(route.baseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: route.model,
+          messages: convertContextToOllamaMessages(context),
+          stream: true,
+          options: {
+            num_ctx: route.contextWindow,
+            ...(typeof typedOptions.temperature === "number"
+              ? { temperature: typedOptions.temperature }
+              : {}),
+            ...(typeof typedOptions.maxTokens === "number"
+              ? { num_predict: typedOptions.maxTokens }
+              : {}),
+          },
+        }),
+        signal: typedOptions.signal as AbortSignal | undefined,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "unknown error");
+        throw new Error(`Ollama API error ${response.status}: ${errorText}`);
+      }
+
+      if (!response.body) {
+        throw new Error("Ollama API returned empty response body");
+      }
+
+      let accumulatedContent = "";
+      let finalResponse: NativeOllamaChatResponse | undefined;
+      let streamStarted = false;
+      let textBlockClosed = false;
+
+      const closeTextBlock = () => {
+        if (!streamStarted || textBlockClosed) {
+          return;
+        }
+
+        textBlockClosed = true;
+        const partial = buildNativeOllamaAssistantMessage(route, accumulatedContent, "stop");
+        stream.push({
+          type: "text_end",
+          contentIndex: 0,
+          content: accumulatedContent,
+          partial,
+        });
+      };
+
+      for await (const chunk of parseNativeOllamaNdjson(response.body.getReader())) {
+        const delta = chunk.message?.content ?? "";
+        if (delta) {
+          if (!streamStarted) {
+            streamStarted = true;
+            const emptyPartial = buildNativeOllamaAssistantMessage(route, "", "stop");
+            stream.push({ type: "start", partial: emptyPartial });
+            stream.push({ type: "text_start", contentIndex: 0, partial: emptyPartial });
+          }
+
+          accumulatedContent += delta;
+          const partial = buildNativeOllamaAssistantMessage(route, accumulatedContent, "stop");
+          stream.push({
+            type: "text_delta",
+            contentIndex: 0,
+            delta,
+            partial,
+          });
+        }
+
+        if (chunk.done) {
+          finalResponse = chunk;
+          break;
+        }
+      }
+
+      if (!finalResponse) {
+        throw new Error("Ollama API stream ended without a final response");
+      }
+
+      closeTextBlock();
+
+      const finalMessage = buildNativeOllamaAssistantMessage(route, accumulatedContent, "stop", {
+        input: finalResponse.prompt_eval_count,
+        output: finalResponse.eval_count,
+      });
+
+      stream.push({
+        type: "done",
+        reason: "stop",
+        message: finalMessage,
+      });
+    } catch (error) {
+      stream.push({
+        type: "error",
+        reason: "error",
+        error: {
+          ...buildNativeOllamaAssistantMessage(route, "", "error"),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        } as AssistantMessage,
+      });
+    } finally {
+      stream.end();
+    }
+  })();
+
+  return stream;
 }
 
 /** 대화 턴 수를 추출 */
@@ -528,6 +927,127 @@ function shouldEscalateLocalRoute(
   return undefined;
 }
 
+type AutoRetryReason = "response_error" | "first_token_timeout";
+
+function resolveRetryTarget(target: RouteTarget): RouteTarget | undefined {
+  if (target === "local") return "nano";
+  if (target === "nano") return "mini";
+  if (target === "mini") return "full";
+  return undefined;
+}
+
+function eventHasStreamOutput(event: AssistantMessageEvent): boolean {
+  if ("partial" in event) {
+    return true;
+  }
+
+  if (event.type === "done") {
+    return event.message.content.some((item) => {
+      if (item.type === "text") return item.text.length > 0;
+      if (item.type === "thinking") return item.thinking.length > 0;
+      return item.type === "toolCall";
+    });
+  }
+
+  const eventType = (event as { type?: string }).type ?? "";
+  return [
+    "text_start",
+    "text_delta",
+    "thinking_start",
+    "thinking_delta",
+    "toolcall_start",
+    "toolcall_delta",
+  ].includes(eventType);
+}
+
+function withAbortSignal(options: unknown, signal?: AbortSignal): unknown {
+  if (!signal || !options || typeof options !== "object") {
+    return options;
+  }
+
+  const typedOptions = options as Record<string, unknown>;
+  if (typedOptions.signal !== undefined) {
+    return options;
+  }
+
+  return {
+    ...typedOptions,
+    signal,
+  };
+}
+
+function wrapStreamWithAutoRetry(
+  primaryStream: AssistantStream,
+  createRetryStream: (reason: AutoRetryReason) => Promise<AssistantStream | undefined>,
+  firstTokenTimeoutMs: number,
+): AssistantStream {
+  const wrapped = createAssistantMessageEventStream();
+  const timeoutEnabled = Number.isFinite(firstTokenTimeoutMs) && firstTokenTimeoutMs > 0;
+  let hasOutput = false;
+  let retried = false;
+
+  const consume = async (stream: AssistantStream, allowRetry: boolean) => {
+    const iterator = stream[Symbol.asyncIterator]();
+
+    while (true) {
+      const nextEventPromise = iterator.next();
+      let result: IteratorResult<AssistantMessageEvent>;
+
+      if (allowRetry && !hasOutput && timeoutEnabled) {
+        const timeoutResult = await Promise.race<IteratorResult<AssistantMessageEvent> | "timeout">([
+          nextEventPromise,
+          new Promise<"timeout">((resolve) => {
+            setTimeout(() => resolve("timeout"), firstTokenTimeoutMs);
+          }),
+        ]);
+
+        if (timeoutResult === "timeout") {
+          if (!retried) {
+            retried = true;
+            const retryStream = await createRetryStream("first_token_timeout");
+            if (retryStream) {
+              await consume(retryStream, false);
+              return;
+            }
+          }
+          throw new Error(`smart-router first token timeout (${firstTokenTimeoutMs}ms)`);
+        }
+
+        result = timeoutResult;
+      } else {
+        result = await nextEventPromise;
+      }
+
+      if (result.done) {
+        return;
+      }
+
+      const event = result.value;
+
+      if (eventHasStreamOutput(event)) {
+        hasOutput = true;
+      }
+
+      if (allowRetry && !hasOutput && event.type === "error" && !retried) {
+        retried = true;
+        const retryStream = await createRetryStream("response_error");
+        if (retryStream) {
+          await consume(retryStream, false);
+          return;
+        }
+      }
+
+      wrapped.push(event);
+    }
+  };
+
+  void (async () => {
+    await consume(primaryStream, true);
+  })();
+
+  return wrapped;
+}
+
 function extractSessionId(options: unknown): string | undefined {
   if (!options || typeof options !== "object") {
     return undefined;
@@ -574,10 +1094,16 @@ function buildRuleEvaluationTrace(
 export const __testing = {
   attachRouteMeta,
   wrapStreamWithRouteMeta,
+  wrapStreamWithAutoRetry,
   parseSmartRouterModelId,
   hasExplicitToolIntent,
   applyToolExposurePolicy,
   shouldEscalateLocalRoute,
+  resolveRetryTarget,
+  resolveEvaluationRequestConfig,
+  resolveClassifierFailureFallback,
+  convertContextToOllamaMessages,
+  createNativeOllamaStream,
 };
 
 // ---------------------------------------------------------------------------
@@ -642,7 +1168,7 @@ export default definePluginEntry({
           provider: {
             baseUrl: pluginConfig.localBaseUrl,
             apiKey: resolveRouterApiKey(),
-            api: toProviderApi(pluginConfig.localApi as string),
+            api: toBootstrapApi(pluginConfig.localApi as string),
             models: [
               {
                 id: "auto",
@@ -705,7 +1231,7 @@ export default definePluginEntry({
         return {
           id: selectedModelId ?? ctx.modelId,
           name: selectedModelId ? `Smart ${selectedModelId}` : ctx.modelId,
-          api: toProviderApi(pluginConfig.localApi as string),
+          api: toBootstrapApi(pluginConfig.localApi as string),
           provider: PROVIDER_ID,
           baseUrl: pluginConfig.localBaseUrl,
           reasoning: false,
@@ -732,6 +1258,17 @@ export default definePluginEntry({
           if (requestedModelId && requestedModelId !== "auto") {
             const routed = resolveRouteModel(pluginConfig, requestedModelId);
             console.log(`[smart-router] 🎯 direct selection → ${routed.label}`);
+            const directToolExposure = applyToolExposurePolicy(
+              context,
+              routed.tier,
+              extractLastUserMessage(context),
+              {
+                turnCount: turnIndex,
+                hasToolUse: detectToolUse(context),
+              },
+              pluginConfig.toolExposureMode,
+              pluginConfig.localForceNoTools,
+            );
             const requestLogger = executionLogger.createRequest({
               requestedModelId,
               routeMode: "direct",
@@ -748,7 +1285,11 @@ export default definePluginEntry({
               sessionId,
               turnIndex,
               rootTurnId,
-              context,
+              toolExposureMode: pluginConfig.toolExposureMode,
+              toolExposureApplied: directToolExposure.applied,
+              originalToolCount: directToolExposure.originalToolCount,
+              retainedToolCount: directToolExposure.retainedToolCount,
+              context: directToolExposure.context,
               extraParams: ctx.extraParams,
               streamOptions: options,
             });
@@ -766,11 +1307,19 @@ export default definePluginEntry({
 
             let stream: AssistantStream;
             try {
-              stream = (await baseStreamFn(
-                directModel as Parameters<typeof baseStreamFn>[0],
-                context as Parameters<typeof baseStreamFn>[1],
-                requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
-              )) as AssistantStream;
+              if (pluginConfig.localApi === "ollama" && routed.tier === "local") {
+                stream = createNativeOllamaStream(
+                  routed,
+                  directToolExposure.context,
+                  requestLogger.wrapOptions(options),
+                );
+              } else {
+                stream = (await baseStreamFn(
+                  directModel as Parameters<typeof baseStreamFn>[0],
+                  directToolExposure.context as Parameters<typeof baseStreamFn>[1],
+                  requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
+                )) as AssistantStream;
+              }
             } catch (error) {
               requestLogger.logStreamFailure(error, {});
               throw error;
@@ -800,27 +1349,60 @@ export default definePluginEntry({
           // 2. 평가 모드에 따라 복잡도 판별
           const decision =
             pluginConfig.evaluationMode === "llm"
-              ? await evaluateComplexityWithLLM(
-                  lastMessage,
-                  pluginConfig.remoteBaseUrl,
-                  pluginConfig.evaluationLlmModel ??
-                    resolveRouteModel(
+              ? await (async () => {
+                  const evaluationRequest = resolveEvaluationRequestConfig(pluginConfig);
+
+                  const runEvaluation = async () =>
+                    evaluateComplexityWithLLM(
+                      lastMessage,
+                      evaluationRequest.baseUrl,
+                      evaluationRequest.model,
+                      evalContext,
+                      pluginConfig.threshold,
+                      pluginConfig.evaluationTimeoutMs,
+                      evaluationRequest.apiType,
+                      evaluationRequest.apiKey,
+                      (trace) => {
+                        evaluationTrace = trace;
+                      },
+                    );
+
+                  let llmDecision = await runEvaluation();
+
+                  for (let retryIndex = 0; retryIndex < pluginConfig.evaluationTimeoutRetryCount; retryIndex += 1) {
+                    const timeoutFallbackToRule =
+                      evaluationTrace?.fallbackToRule === true &&
+                      typeof evaluationTrace.error === "string" &&
+                      isClassifierTimeoutError(evaluationTrace.error);
+                    if (!timeoutFallbackToRule) {
+                      break;
+                    }
+                    llmDecision = await runEvaluation();
+                  }
+
+                  const classifierFallback = resolveClassifierFailureFallback(pluginConfig, evaluationTrace);
+
+                  if (classifierFallback) {
+                    const fallbackRoute = resolveRouteModel(
                       pluginConfig,
-                      pluginConfig.evaluationLlmTarget,
-                    ).model,
-                  evalContext,
-                  pluginConfig.threshold,
-                  pluginConfig.evaluationTimeoutMs,
-                  pluginConfig.remoteApi === "openai-responses"
-                    ? "openai-responses"
-                    : "openai" as LocalApiType,
-                  pluginConfig.remoteBaseUrl.includes("api.openai.com")
-                    ? process.env.OPENAI_API_KEY?.trim()
-                    : undefined,
-                  (trace) => {
-                    evaluationTrace = trace;
-                  },
-                )
+                      classifierFallback.target,
+                    );
+                    llmDecision = {
+                      ...llmDecision,
+                      target: classifierFallback.target,
+                      reason: `${llmDecision.reason}, ${classifierFallback.reason}: ${fallbackRoute.label}`,
+                    };
+                    if (evaluationTrace) {
+                      evaluationTrace = {
+                        ...evaluationTrace,
+                        finalTarget: classifierFallback.target,
+                        classifierReason: llmDecision.reason,
+                      };
+                    }
+                  }
+
+                  return llmDecision;
+                })()
               : (() => {
                   const evaluationStartedAt = Date.now();
                   const ruleDecision = evaluateComplexity(lastMessage, evalContext, pluginConfig.threshold);
@@ -920,18 +1502,33 @@ export default definePluginEntry({
           };
 
           let stream: AssistantStream;
+          const firstAttemptAbort = new AbortController();
           try {
-            stream = (await baseStreamFn(
-              routedModel as Parameters<typeof baseStreamFn>[0],
-              toolExposure.context as Parameters<typeof baseStreamFn>[1],
-              requestLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
-            )) as AssistantStream;
+            if (pluginConfig.localApi === "ollama" && routed.tier === "local") {
+              stream = createNativeOllamaStream(
+                routed,
+                toolExposure.context,
+                withAbortSignal(
+                  requestLogger.wrapOptions(options),
+                  pluginConfig.streamRetryOnFailure ? firstAttemptAbort.signal : undefined,
+                ),
+              );
+            } else {
+              stream = (await baseStreamFn(
+                routedModel as Parameters<typeof baseStreamFn>[0],
+                toolExposure.context as Parameters<typeof baseStreamFn>[1],
+                withAbortSignal(
+                  requestLogger.wrapOptions(options),
+                  pluginConfig.streamRetryOnFailure ? firstAttemptAbort.signal : undefined,
+                ) as Parameters<typeof baseStreamFn>[2],
+              )) as AssistantStream;
+            }
           } catch (error) {
             requestLogger.logStreamFailure(error, {});
             throw error;
           }
 
-          return wrapStreamWithRouteMeta(
+          const primaryWrappedStream = wrapStreamWithRouteMeta(
             stream,
             pluginConfig.showModelLabel
               ? {
@@ -942,6 +1539,109 @@ export default definePluginEntry({
                 }
               : undefined,
             requestLogger,
+          );
+
+          const createRetryStream = async (reason: AutoRetryReason): Promise<AssistantStream | undefined> => {
+            if (!pluginConfig.streamRetryOnFailure) {
+              return undefined;
+            }
+
+            const retryTarget = resolveRetryTarget(routed.tier);
+            if (!retryTarget) {
+              return undefined;
+            }
+
+            firstAttemptAbort.abort();
+
+            const retryRoute = resolveRouteModel(pluginConfig, retryTarget);
+            const retryDecision = {
+              ...adjustedDecision,
+              target: retryTarget,
+              reason: `${adjustedDecision.reason} | [retry:${reason}] ${routed.tier} -> ${retryTarget}`,
+            };
+            const retryToolExposure = applyToolExposurePolicy(
+              context,
+              retryRoute.tier,
+              lastMessage,
+              evalContext,
+              pluginConfig.toolExposureMode,
+              pluginConfig.localForceNoTools,
+            );
+
+            const retryLogger = executionLogger.createRequest({
+              requestedModelId: requestedModelId ?? String((model as Record<string, unknown>)?.id ?? "unknown"),
+              routeMode: "auto",
+              evaluationMode: pluginConfig.evaluationMode,
+              threshold: pluginConfig.threshold,
+              routeTier: retryRoute.tier,
+              routeProvider: retryRoute.provider,
+              routeModel: retryRoute.model,
+              routeApi: retryRoute.api,
+              routeLabel: retryRoute.label,
+              thinkingLevel: ctx.thinkingLevel,
+              workspaceDir: ctx.workspaceDir,
+              agentDir: ctx.agentDir,
+              sessionId,
+              turnIndex,
+              rootTurnId,
+              toolExposureMode: pluginConfig.toolExposureMode,
+              toolExposureApplied: retryToolExposure.applied,
+              originalToolCount: retryToolExposure.originalToolCount,
+              retainedToolCount: retryToolExposure.retainedToolCount,
+              routeAdjustmentReason: `retry:${reason}:${routed.tier}->${retryRoute.tier}`,
+              localHealth,
+              context: retryToolExposure.context,
+              extraParams: ctx.extraParams,
+              streamOptions: options,
+              decision: {
+                level: retryDecision.level,
+                reason: retryDecision.reason,
+                scoreTotal: retryDecision.score.total,
+                scoreBreakdown: retryDecision.score.breakdown,
+              },
+            });
+            retryLogger.logRoute();
+
+            const retryModel = {
+              ...(model as Record<string, unknown>),
+              id: retryRoute.model,
+              api: retryRoute.api,
+              baseUrl: retryRoute.baseUrl,
+              provider: retryRoute.provider,
+              contextWindow: retryRoute.contextWindow,
+              maxTokens: retryRoute.maxTokens,
+            };
+
+            let retryStream: AssistantStream;
+            try {
+              retryStream = (await baseStreamFn(
+                retryModel as Parameters<typeof baseStreamFn>[0],
+                retryToolExposure.context as Parameters<typeof baseStreamFn>[1],
+                retryLogger.wrapOptions(options) as Parameters<typeof baseStreamFn>[2],
+              )) as AssistantStream;
+            } catch (error) {
+              retryLogger.logStreamFailure(error, {});
+              return undefined;
+            }
+
+            return wrapStreamWithRouteMeta(
+              retryStream,
+              pluginConfig.showModelLabel
+                ? {
+                    source: PROVIDER_ID,
+                    mode: "auto",
+                    tier: retryRoute.tier,
+                    level: retryDecision.level,
+                  }
+                : undefined,
+              retryLogger,
+            );
+          };
+
+          return wrapStreamWithAutoRetry(
+            primaryWrappedStream,
+            createRetryStream,
+            pluginConfig.streamFirstTokenTimeoutMs,
           );
         };
       },

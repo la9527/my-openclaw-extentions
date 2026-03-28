@@ -85,6 +85,17 @@ tool schema가 prompt 비용을 크게 키는 문제를 줄이기 위해 아래 
 4. `경보 조건 3개` 같은 alert-only 운영 요청은 `complex/mini` 쪽으로 낮추는 guardrail 추가
 5. LLM timeout 시 짧은 고급 운영 설계 질의가 `local` 로 떨어지지 않도록 fallback floor 추가
 
+### 7. 분류 실패 원인별 fallback 최종 정책
+
+2026-03-29 기준으로 분류 실패 시 fallback 정책을 아래로 고정했다.
+
+1. 분류 timeout이 `3초 이상`이면 `full`로 fallback
+2. 분류 JSON 파싱 실패면 `nano`로 fallback
+3. 분류 연결 실패(fetch/network)면 `nano`로 fallback
+4. 분류 HTTP 실패면 `nano`로 fallback
+
+즉, timeout 계열만 `full` 승격 후보로 보고 그 외 실패는 `nano`로 통일한다.
+
 ## 현재 기본 모델 구성
 
 현재 기본값은 아래와 같다.
@@ -109,10 +120,11 @@ cd /Volumes/ExtData/MyOpenClawRepo/extensions/smart-router
 pnpm exec vitest run complexity.test.ts index.test.ts smart-router-log.test.ts
 ```
 
-결과:
+결과(2026-03-29 재확인):
 
-1. `3`개 테스트 파일 통과
-2. `46`개 테스트 통과
+1. `complexity.test.ts` + `index.test.ts` 는 `54`개 모두 통과
+2. `smart-router-log.test.ts` 는 환경 의존 `prune` 케이스 `1`건이 간헐 실패할 수 있음
+3. 전체 실행 기준 최근 결과는 `61`개 중 `60`개 통과
 
 ## 실호출 검증에서 확인된 핵심 결과
 

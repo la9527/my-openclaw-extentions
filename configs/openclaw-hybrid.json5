@@ -2,35 +2,24 @@
 // 이 파일을 ~/.openclaw/openclaw.json 에 병합하여 사용
 //
 // 현재 권장 기준:
-//   1. MyOpenClawRepo/infra/docker/docker-compose.yml 로 Ollama 실행
-//   2. 기본 local 모델은 gemma3:4b
-//   3. qwen2.5:14b-instruct 는 후보/수동 전환용으로 유지
+//   1. 기본 local 런타임은 LM Studio OpenAI 호환 endpoint 사용
+//   2. 기본 local 모델은 lmstudio-community/LFM2-24B-A2B-MLX-4bit
+//   3. 분류기는 local 우선 + timeout>=3s면 full, JSON/연결/HTTP 실패면 nano
 //   4. 환경변수: export OPENAI_API_KEY=sk-...
-//   5. 호스트 Ollama(11434)와 충돌을 피하기 위해 Docker Ollama published port 는 11435 기준
 {
   // ── 모델 프로바이더 ──────────────────────────────────────────
-  // smart-router 가 Ollama native API 를 직접 사용한다.
-  // /model 명령으로 직접 전환하려면 local 후보 모델도 같이 등록해둔다.
+  // smart-router 가 LM Studio OpenAI 호환 API를 local 경로로 사용한다.
   "models": {
     "mode": "merge",
     "providers": {
-      "ollama": {
-        "baseUrl": "http://127.0.0.1:11435",
-        "apiKey": "ollama-local",
-        "api": "ollama",
+      "lmstudio": {
+        "baseUrl": "http://127.0.0.1:1235/v1",
+        "apiKey": "lm-studio",
+        "api": "openai-completions",
         "models": [
           {
-            "id": "gemma3:4b",
-            "name": "Gemma 3 4B (로컬 기본)",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 32768,
-            "maxTokens": 8192
-          },
-          {
-            "id": "qwen2.5:14b-instruct",
-            "name": "Qwen 2.5 14B Instruct (로컬 후보)",
+            "id": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+            "name": "LFM2 24B A2B MLX 4bit (로컬 기본)",
             "reasoning": false,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
@@ -62,8 +51,7 @@
         "smart-router/nano": {},
         "smart-router/mini": {},
         "smart-router/full": {},
-        "ollama/gemma3:4b": {},
-        "ollama/qwen2.5:14b-instruct": {},
+        "lmstudio/lmstudio-community/LFM2-24B-A2B-MLX-4bit": {},
         "openai/gpt-5.4-mini-2026-03-17": {}
       }
     }
@@ -75,11 +63,11 @@
       "smart-router": {
         "enabled": true,
         "config": {
-          // 로컬 LLM 설정 (Ollama)
-          "localProvider": "ollama",
-          "localModel": "gemma3:4b",
-          "localBaseUrl": "http://127.0.0.1:11435",
-          "localApi": "ollama",
+          // 로컬 LLM 설정 (LM Studio)
+          "localProvider": "lmstudio",
+          "localModel": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+          "localBaseUrl": "http://127.0.0.1:1235/v1",
+          "localApi": "openai",
           // 외부 LLM 설정
           "remoteProvider": "openai",
           "nanoModel": "gpt-5.4-nano-2026-03-17",
@@ -91,13 +79,17 @@
           "threshold": "moderate",
           // 복잡도 평가는 LLM 분류 모델 사용 (rule 보다 정확)
           "evaluationMode": "llm",
-          // llm 평가 모드에서 분류 모델로 nano tier 사용 가능
-          "evaluationLlmTarget": "nano",
-          // LLM 평가 타임아웃 (ms). llm 모드에서만 사용
-          "evaluationTimeoutMs": 10000,
+          // llm 평가 모드에서 분류 모델은 local 경로 사용
+          "evaluationLlmTarget": "local",
+          // LLM 평가 타임아웃 (ms). timeout>=3s면 full fallback
+          "evaluationTimeoutMs": 3000,
+          "evaluationTimeoutRetryCount": 1,
+          "evaluationTimeoutFallbackTarget": "nano",
+          "streamFirstTokenTimeoutMs": 15000,
+          "streamRetryOnFailure": true,
           // 응답 첫 줄에 선택된 모델 표시
           "showModelLabel": true,
-          // Ollama 는 tools를 지원하지 않으므로 local 라우팅 시 항상 tool schema 제거
+          // local 라우팅 시 tool schema 제거
           "localForceNoTools": true,
           // local 상태가 나쁠 때 nano 로 1차 승격 허용
           "latencyAwareRouting": true
