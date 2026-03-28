@@ -1,27 +1,36 @@
 // OpenClaw 하이브리드 LLM 라우팅 설정 예시
 // 이 파일을 ~/.openclaw/openclaw.json 에 병합하여 사용
 //
-// 사전 조건:
-//   1. LM Studio 또는 Ollama 실행 중
-//   2. 로컬 모델 로드됨
-//   3. smart-router 플러그인 설치됨
+// 현재 권장 기준:
+//   1. MyOpenClawRepo/infra/docker/docker-compose.yml 로 Ollama 실행
+//   2. 기본 local 모델은 gemma3:4b
+//   3. qwen2.5:14b-instruct 는 후보/수동 전환용으로 유지
 //   4. 환경변수: export OPENAI_API_KEY=sk-...
+//   5. 호스트 Ollama(11434)와 충돌을 피하기 위해 Docker Ollama published port 는 11435 기준
 {
   // ── 모델 프로바이더 ──────────────────────────────────────────
-  // smart-router가 LM Studio를 직접 사용하므로 별도 프로바이더는
-  // 등록하지 않아도 된다. 하지만 /model 명령으로
-  // 수동 전환하려면 아래처럼 등록해둔다.
+  // smart-router 가 Ollama native API 를 직접 사용한다.
+  // /model 명령으로 직접 전환하려면 local 후보 모델도 같이 등록해둔다.
   "models": {
     "mode": "merge",
     "providers": {
-      "lmstudio": {
-        "baseUrl": "http://127.0.0.1:1235/v1",
-        "apiKey": "lm-studio",
-        "api": "openai",
+      "ollama": {
+        "baseUrl": "http://127.0.0.1:11435",
+        "apiKey": "ollama-local",
+        "api": "ollama",
         "models": [
           {
-            "id": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-            "name": "LFM2 24B MLX 4bit (로컬)",
+            "id": "gemma3:4b",
+            "name": "Gemma 3 4B (로컬 기본)",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          },
+          {
+            "id": "qwen2.5:14b-instruct",
+            "name": "Qwen 2.5 14B Instruct (로컬 후보)",
             "reasoning": false,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
@@ -36,18 +45,25 @@
   // ── 에이전트 기본 설정 ─────────────────────────────────────
   "agents": {
     "defaults": {
+      "compaction": {
+        // 세션 요약 시 사용하는 모델 (smart-router/auto 대신 직접 지정)
+        "model": "openai/gpt-5.4-mini-2026-03-17"
+      },
       "model": {
         // smart-router/auto 를 primary로 설정하면
         // 복잡도에 따라 로컬↔외부 자동 라우팅
         "primary": "smart-router/auto",
         // 선택 사항: smart-router 자체 장애 시 직접 외부 LLM 사용
-        "fallbacks": [
-          "openai/gpt-5.4-mini-2026-03-17"
-        ]
+        "fallbacks": ["openai/gpt-5.4-mini-2026-03-17"]
       },
       "models": {
         "smart-router/auto": {},
-        "lmstudio/lmstudio-community/LFM2-24B-A2B-MLX-4bit": {},
+        "smart-router/local": {},
+        "smart-router/nano": {},
+        "smart-router/mini": {},
+        "smart-router/full": {},
+        "ollama/gemma3:4b": {},
+        "ollama/qwen2.5:14b-instruct": {},
         "openai/gpt-5.4-mini-2026-03-17": {}
       }
     }
@@ -59,11 +75,11 @@
       "smart-router": {
         "enabled": true,
         "config": {
-          // 로컬 LLM 설정 (LM Studio)
-          "localProvider": "lmstudio",
-          "localModel": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-          "localBaseUrl": "http://127.0.0.1:1235/v1",
-          "localApi": "openai",
+          // 로컬 LLM 설정 (Ollama)
+          "localProvider": "ollama",
+          "localModel": "gemma3:4b",
+          "localBaseUrl": "http://127.0.0.1:11435",
+          "localApi": "ollama",
           // 외부 LLM 설정
           "remoteProvider": "openai",
           "nanoModel": "gpt-5.4-nano-2026-03-17",
@@ -73,14 +89,18 @@
           "remoteApi": "openai-responses",
           // 이 수준 이상이면 외부 tier(nano/mini/full) 라우팅
           "threshold": "moderate",
-          // 복잡도 평가는 기본적으로 rule 모드 사용
-          "evaluationMode": "rule",
+          // 복잡도 평가는 LLM 분류 모델 사용 (rule 보다 정확)
+          "evaluationMode": "llm",
           // llm 평가 모드에서 분류 모델로 nano tier 사용 가능
           "evaluationLlmTarget": "nano",
           // LLM 평가 타임아웃 (ms). llm 모드에서만 사용
           "evaluationTimeoutMs": 10000,
           // 응답 첫 줄에 선택된 모델 표시
-          "showModelLabel": true
+          "showModelLabel": true,
+          // Ollama 는 tools를 지원하지 않으므로 local 라우팅 시 항상 tool schema 제거
+          "localForceNoTools": true,
+          // local 상태가 나쁠 때 nano 로 1차 승격 허용
+          "latencyAwareRouting": true
         }
       }
     }

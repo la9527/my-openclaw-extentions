@@ -1,5 +1,7 @@
 # OpenClaw 하이브리드 LLM 라우팅 구성 작업 방안
 
+> 현재 운영 기준 아님. 이 문서는 초기 구상 기록이며, 현재 실제 운영 기준은 [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md) 와 [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5) 를 따른다.
+
 > 작성일: 2026-03-24  
 > 대상 환경: Mac mini M4 (32GB) / macOS / OpenClaw 2026.3.13  
 > 목적: 기본 요청은 로컬 LLM(Ollama)으로 처리하고, 복잡한 요청은 외부 LLM으로 전달하는 하이브리드 구조 구현
