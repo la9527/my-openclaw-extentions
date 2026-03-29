@@ -87,6 +87,7 @@ const DEFAULTS = {
   logRetentionDays: 10,
   toolExposureMode: "conservative" as ToolExposureMode,
   localForceNoTools: false,
+  localVisionEnabled: false,
   latencyAwareRouting: true,
   localLatencyP95ThresholdMs: 12_000,
   localErrorRateThreshold: 0.25,
@@ -233,6 +234,12 @@ function resolveConfig(pluginConfig?: Record<string, unknown>) {
     logRetentionDays: Number(pluginConfig?.logRetentionDays ?? DEFAULTS.logRetentionDays),
     toolExposureMode: (pluginConfig?.toolExposureMode as ToolExposureMode | undefined) ?? DEFAULTS.toolExposureMode,
     localForceNoTools: Boolean(pluginConfig?.localForceNoTools ?? DEFAULTS.localForceNoTools),
+    localVisionEnabled:
+      typeof pluginConfig?.localVisionEnabled === "boolean"
+        ? pluginConfig.localVisionEnabled
+        : pluginConfig?.localVisionEnabled === undefined
+          ? DEFAULTS.localVisionEnabled
+          : String(pluginConfig.localVisionEnabled).toLowerCase() === "true",
     latencyAwareRouting:
       typeof pluginConfig?.latencyAwareRouting === "boolean"
         ? pluginConfig.latencyAwareRouting
@@ -527,6 +534,28 @@ function extractLastUserMessage(context: unknown): string {
   return "";
 }
 
+/** 메시지 context에서 이미지 content block 포함 여부 감지 */
+function hasImageContent(context: unknown): boolean {
+  if (!context || typeof context !== "object") return false;
+  const ctx = context as Record<string, unknown>;
+  const messages = ctx.messages ?? ctx.input;
+  if (!Array.isArray(messages)) return false;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== "object") continue;
+    const typedMsg = msg as Record<string, unknown>;
+    if (typedMsg.role !== "user") continue;
+    if (!Array.isArray(typedMsg.content)) continue;
+    for (const item of typedMsg.content) {
+      if (item && typeof item === "object" && (item as Record<string, unknown>).type === "image") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function summarizeMessageText(content: unknown): string {
   if (typeof content === "string") {
     return content;
@@ -588,6 +617,158 @@ function convertContextToOllamaMessages(context: unknown): Array<Record<string, 
       continue;
     }
     messages.push({ role: normalizedRole, content });
+  }
+
+  return messages;
+}
+
+/**
+ * Ollama native API용 메시지 변환 (멀티모달 지원).
+ * 이미지가 있는 user 메시지는 content(string) + images(string[] base64) 형태로 반환.
+ */
+function convertContextToOllamaMessagesWithImages(
+  context: unknown,
+): Array<Record<string, unknown>> {
+  if (!context || typeof context !== "object") {
+    return [];
+  }
+
+  const typedContext = context as Record<string, unknown>;
+  const messages: Array<Record<string, unknown>> = [];
+
+  if (typeof typedContext.systemPrompt === "string" && typedContext.systemPrompt.trim()) {
+    messages.push({ role: "system", content: typedContext.systemPrompt });
+  }
+
+  const rawMessages = typedContext.messages;
+  if (!Array.isArray(rawMessages)) {
+    return messages;
+  }
+
+  for (const rawMessage of rawMessages) {
+    if (!rawMessage || typeof rawMessage !== "object") {
+      continue;
+    }
+
+    const typedMessage = rawMessage as Record<string, unknown>;
+    const role = typeof typedMessage.role === "string" ? typedMessage.role : "user";
+    const normalizedRole = role === "toolResult" ? "tool" : role;
+
+    if (!Array.isArray(typedMessage.content)) {
+      const content = summarizeMessageText(typedMessage.content);
+      if (!content.trim()) continue;
+      messages.push({ role: normalizedRole, content });
+      continue;
+    }
+
+    // content 배열: text와 image block 분리
+    const textParts: string[] = [];
+    const imageBase64List: string[] = [];
+
+    for (const item of typedMessage.content) {
+      if (!item || typeof item !== "object") continue;
+      const typedItem = item as Record<string, unknown>;
+
+      if (
+        (typedItem.type === "text" || typedItem.type === "input_text" || typedItem.type === "output_text") &&
+        typeof typedItem.text === "string"
+      ) {
+        textParts.push(typedItem.text);
+      } else if (typedItem.type === "image" && typeof typedItem.data === "string") {
+        imageBase64List.push(typedItem.data);
+      }
+    }
+
+    const content = textParts.join("\n");
+    if (!content.trim() && imageBase64List.length === 0) continue;
+
+    const msg: Record<string, unknown> = { role: normalizedRole, content };
+    if (imageBase64List.length > 0) {
+      msg.images = imageBase64List;
+    }
+    messages.push(msg);
+  }
+
+  return messages;
+}
+
+/**
+ * OpenAI chat completions API용 메시지 변환 (멀티모달 지원).
+ * 이미지가 있는 user 메시지는 content를 array(text/image_url 블록)로 반환.
+ * 이미지가 없는 메시지는 content를 string으로 반환.
+ */
+function convertContextToOpenAIMessages(
+  context: unknown,
+): Array<Record<string, unknown>> {
+  if (!context || typeof context !== "object") {
+    return [];
+  }
+
+  const typedContext = context as Record<string, unknown>;
+  const messages: Array<Record<string, unknown>> = [];
+
+  if (typeof typedContext.systemPrompt === "string" && typedContext.systemPrompt.trim()) {
+    messages.push({ role: "system", content: typedContext.systemPrompt });
+  }
+
+  const rawMessages = typedContext.messages;
+  if (!Array.isArray(rawMessages)) {
+    return messages;
+  }
+
+  for (const rawMessage of rawMessages) {
+    if (!rawMessage || typeof rawMessage !== "object") {
+      continue;
+    }
+
+    const typedMessage = rawMessage as Record<string, unknown>;
+    const role = typeof typedMessage.role === "string" ? typedMessage.role : "user";
+    const normalizedRole = role === "toolResult" ? "tool" : role;
+
+    if (!Array.isArray(typedMessage.content)) {
+      const content = summarizeMessageText(typedMessage.content);
+      if (!content.trim()) continue;
+      messages.push({ role: normalizedRole, content });
+      continue;
+    }
+
+    // content 배열 처리: text/image 블록 분류
+    const contentBlocks: Array<Record<string, unknown>> = [];
+    let hasImages = false;
+
+    for (const item of typedMessage.content) {
+      if (!item || typeof item !== "object") continue;
+      const typedItem = item as Record<string, unknown>;
+
+      if (
+        (typedItem.type === "text" || typedItem.type === "input_text" || typedItem.type === "output_text") &&
+        typeof typedItem.text === "string"
+      ) {
+        contentBlocks.push({ type: "text", text: typedItem.text });
+      } else if (typedItem.type === "image" && typeof typedItem.data === "string") {
+        hasImages = true;
+        const mimeType =
+          typeof typedItem.mimeType === "string" ? typedItem.mimeType : "image/jpeg";
+        contentBlocks.push({
+          type: "image_url",
+          image_url: { url: `data:${mimeType};base64,${typedItem.data}` },
+        });
+      }
+    }
+
+    if (contentBlocks.length === 0) continue;
+
+    // 이미지가 없으면 content를 string으로 단순화 (비전 미지원 모델 호환)
+    if (!hasImages) {
+      const text = contentBlocks
+        .filter((b) => b.type === "text")
+        .map((b) => b.text as string)
+        .join("\n");
+      if (!text.trim()) continue;
+      messages.push({ role: normalizedRole, content: text });
+    } else {
+      messages.push({ role: normalizedRole, content: contentBlocks });
+    }
   }
 
   return messages;
@@ -788,7 +969,7 @@ function createNativeOllamaStream(route: RouteModelConfig, context: unknown, opt
         },
         body: JSON.stringify({
           model: route.model,
-          messages: convertContextToOllamaMessages(context),
+          messages: convertContextToOllamaMessagesWithImages(context),
           stream: true,
           options: {
             num_ctx: route.contextWindow,
@@ -914,7 +1095,7 @@ function createNativeOpenAICompletionsStream(
         headers,
         body: JSON.stringify({
           model: route.model,
-          messages: convertContextToOllamaMessages(context),
+          messages: convertContextToOpenAIMessages(context),
           stream: true,
           stream_options: {
             include_usage: true,
@@ -1357,12 +1538,15 @@ export const __testing = {
   wrapStreamWithAutoRetry,
   parseSmartRouterModelId,
   hasExplicitToolIntent,
+  hasImageContent,
   applyToolExposurePolicy,
   shouldEscalateLocalRoute,
   resolveRetryTarget,
   resolveEvaluationRequestConfig,
   resolveClassifierFailureFallback,
   convertContextToOllamaMessages,
+  convertContextToOllamaMessagesWithImages,
+  convertContextToOpenAIMessages,
   createNativeOllamaStream,
   createNativeOpenAICompletionsStream,
 };
@@ -1435,7 +1619,7 @@ export default definePluginEntry({
                 id: "auto",
                 name: "Smart Auto (로컬 우선, 자동 라우팅)",
                 reasoning: false,
-                input: ["text"],
+                input: ["text", "image"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                 contextWindow: 32768,
                 maxTokens: 8192,
@@ -1444,7 +1628,7 @@ export default definePluginEntry({
                 id: "local",
                 name: "Smart Local (LM Studio 직접)",
                 reasoning: false,
-                input: ["text"],
+                input: ["text", "image"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                 contextWindow: 32768,
                 maxTokens: 8192,
@@ -1453,7 +1637,7 @@ export default definePluginEntry({
                 id: "nano",
                 name: "Smart Nano (직접 선택)",
                 reasoning: false,
-                input: ["text"],
+                input: ["text", "image"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                 contextWindow: 128000,
                 maxTokens: 16384,
@@ -1462,7 +1646,7 @@ export default definePluginEntry({
                 id: "mini",
                 name: "Smart Mini (직접 선택)",
                 reasoning: false,
-                input: ["text"],
+                input: ["text", "image"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                 contextWindow: 128000,
                 maxTokens: 16384,
@@ -1471,7 +1655,7 @@ export default definePluginEntry({
                 id: "full",
                 name: "Smart Full (직접 선택)",
                 reasoning: false,
-                input: ["text"],
+                input: ["text", "image"],
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                 contextWindow: 128000,
                 maxTokens: 32768,
@@ -1496,7 +1680,7 @@ export default definePluginEntry({
           provider: PROVIDER_ID,
           baseUrl: pluginConfig.localBaseUrl,
           reasoning: false,
-          input: ["text"],
+          input: ["text", "image"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: 32768,
           maxTokens: 8192,
@@ -1702,6 +1886,22 @@ export default definePluginEntry({
                 ...evaluationTrace,
                 finalTarget: "nano",
               };
+            }
+          }
+
+          // localVisionEnabled=false 이고 이미지 포함 요청을 local로 라우팅하면 mini로 승격
+          if (
+            adjustedDecision.target === "local" &&
+            !pluginConfig.localVisionEnabled &&
+            hasImageContent(context)
+          ) {
+            adjustedDecision = {
+              ...adjustedDecision,
+              target: "mini",
+              reason: `${adjustedDecision.reason} | [vision] 이미지 포함 요청 local→mini 승격 (localVisionEnabled=false)`,
+            };
+            if (evaluationTrace) {
+              evaluationTrace = { ...evaluationTrace, finalTarget: "mini" };
             }
           }
 
