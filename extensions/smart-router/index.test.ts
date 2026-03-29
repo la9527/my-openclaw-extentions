@@ -480,4 +480,94 @@ describe("smart-router route metadata", () => {
       });
     }
   });
+
+  it("executes direct local requests through OpenAI-compatible SSE stream", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"안녕"}}]}\n\n' +
+              'data: {"choices":[{"delta":{"content":" 하"}}]}\n\n' +
+              'data: {"choices":[{"delta":{"content":"세요"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}\n\n' +
+              "data: [DONE]\n\n",
+          ),
+        );
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stream = __testing.createNativeOpenAICompletionsStream(
+      {
+        tier: "local",
+        provider: "smart-router",
+        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        baseUrl: "http://127.0.0.1:1235/v1",
+        api: "openai-completions",
+        contextWindow: 32768,
+        maxTokens: 8192,
+        label: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      },
+      {
+        messages: [{ role: "user", content: "인사만 해줘" }],
+      },
+      {},
+      "lm-studio",
+    );
+
+    const events: AssistantMessageEvent[] = [];
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === "done" || event.type === "error") {
+        break;
+      }
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:1235/v1/chat/completions",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1] as { body?: string };
+    expect(request.body).toBeTypeOf("string");
+    expect(JSON.parse(request.body ?? "{}")).toMatchObject({
+      model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      stream: true,
+      messages: [{ role: "user", content: "인사만 해줘" }],
+    });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "text_start",
+      "text_delta",
+      "text_delta",
+      "text_delta",
+      "text_end",
+      "done",
+    ]);
+    const deltas = events.filter((event) => event.type === "text_delta");
+    expect(deltas).toHaveLength(3);
+    expect(deltas[0]).toMatchObject({ delta: "안녕" });
+    expect(deltas[1]).toMatchObject({ delta: " 하" });
+    expect(deltas[2]).toMatchObject({ delta: "세요" });
+
+    const doneEvent = events.at(-1);
+    expect(doneEvent?.type).toBe("done");
+    if (doneEvent?.type === "done") {
+      expect(doneEvent.message.api).toBe("openai-completions");
+      expect(doneEvent.message.content).toEqual([{ type: "text", text: "안녕 하세요" }]);
+      expect(doneEvent.message.usage).toMatchObject({
+        input: 8,
+        output: 3,
+        totalTokens: 11,
+      });
+    }
+  });
 });

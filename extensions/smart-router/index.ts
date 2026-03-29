@@ -146,6 +146,17 @@ function resolveOllamaChatUrl(baseUrl: string): string {
   return `${trimmed.replace(/\/v1$/i, "")}/api/chat`;
 }
 
+function resolveOpenAIChatCompletionsUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (/\/chat\/completions$/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/\/v1$/i.test(trimmed)) {
+    return `${trimmed}/chat/completions`;
+  }
+  return `${trimmed}/chat/completions`;
+}
+
 function resolveRouterApiKey(): string {
   return (
     process.env.OPENAI_API_KEY?.trim() ||
@@ -592,6 +603,25 @@ type NativeOllamaChatResponse = {
   eval_count?: number;
 };
 
+type OpenAIChatCompletionsChunk = {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      reasoning_content?: string;
+      reasoning?: string;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  error?: {
+    message?: string;
+  };
+};
+
 async function* parseNativeOllamaNdjson(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): AsyncGenerator<NativeOllamaChatResponse> {
@@ -624,6 +654,73 @@ async function* parseNativeOllamaNdjson(
   }
 }
 
+async function* parseSseDataLines(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let dataLines: string[] = [];
+
+  const flushEvent = () => {
+    if (dataLines.length === 0) {
+      return undefined;
+    }
+    const payload = dataLines.join("\n").trim();
+    dataLines = [];
+    return payload;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let newLineIndex = buffer.indexOf("\n");
+    while (newLineIndex >= 0) {
+      let line = buffer.slice(0, newLineIndex);
+      buffer = buffer.slice(newLineIndex + 1);
+
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+
+      if (!line.trim()) {
+        const payload = flushEvent();
+        if (payload) {
+          yield payload;
+        }
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+
+      newLineIndex = buffer.indexOf("\n");
+    }
+  }
+
+  if (buffer.trim().startsWith("data:")) {
+    dataLines.push(buffer.trim().slice(5).trimStart());
+  }
+
+  const trailingPayload = flushEvent();
+  if (trailingPayload) {
+    yield trailingPayload;
+  }
+}
+
+async function* parseOpenAIChatCompletionsSse(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): AsyncGenerator<OpenAIChatCompletionsChunk> {
+  for await (const payload of parseSseDataLines(reader)) {
+    if (payload === "[DONE]") {
+      return;
+    }
+    yield JSON.parse(payload) as OpenAIChatCompletionsChunk;
+  }
+}
+
 function buildNativeOllamaAssistantMessage(
   route: RouteModelConfig,
   text: string,
@@ -643,6 +740,35 @@ function buildNativeOllamaAssistantMessage(
       cacheRead: 0,
       cacheWrite: 0,
       totalTokens: (usage?.input ?? 0) + (usage?.output ?? 0),
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    timestamp: Date.now(),
+  } as AssistantMessage;
+}
+
+function buildNativeOpenAIAssistantMessage(
+  route: RouteModelConfig,
+  text: string,
+  stopReason: "stop" | "length" | "error",
+  usage?: { input?: number; output?: number; total?: number },
+): AssistantMessage {
+  const input = usage?.input ?? 0;
+  const output = usage?.output ?? 0;
+  const totalTokens = usage?.total ?? input + output;
+
+  return {
+    role: "assistant",
+    provider: route.provider,
+    api: "openai-completions",
+    model: route.model,
+    stopReason,
+    content: text ? [{ type: "text", text }] : [],
+    usage: {
+      input,
+      output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
     timestamp: Date.now(),
@@ -754,6 +880,140 @@ function createNativeOllamaStream(route: RouteModelConfig, context: unknown, opt
         reason: "error",
         error: {
           ...buildNativeOllamaAssistantMessage(route, "", "error"),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        } as AssistantMessage,
+      });
+    } finally {
+      stream.end();
+    }
+  })();
+
+  return stream;
+}
+
+function createNativeOpenAICompletionsStream(
+  route: RouteModelConfig,
+  context: unknown,
+  options: unknown,
+  apiKey?: string,
+): AssistantStream {
+  const stream = createAssistantMessageEventStream();
+  const typedOptions = options && typeof options === "object" ? (options as Record<string, unknown>) : {};
+
+  void (async () => {
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (apiKey?.trim()) {
+        headers.Authorization = `Bearer ${apiKey.trim()}`;
+      }
+
+      const response = await fetch(resolveOpenAIChatCompletionsUrl(route.baseUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: route.model,
+          messages: convertContextToOllamaMessages(context),
+          stream: true,
+          stream_options: {
+            include_usage: true,
+          },
+          ...(typeof typedOptions.temperature === "number"
+            ? { temperature: typedOptions.temperature }
+            : {}),
+          ...(typeof typedOptions.maxTokens === "number"
+            ? { max_tokens: typedOptions.maxTokens }
+            : {}),
+        }),
+        signal: typedOptions.signal as AbortSignal | undefined,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "unknown error");
+        throw new Error(`OpenAI-compatible API error ${response.status}: ${errorText}`);
+      }
+
+      if (!response.body) {
+        throw new Error("OpenAI-compatible API returned empty response body");
+      }
+
+      let accumulatedContent = "";
+      let finishReason: string | null | undefined;
+      let usage: { input?: number; output?: number; total?: number } | undefined;
+      let streamStarted = false;
+      let textBlockClosed = false;
+
+      const closeTextBlock = () => {
+        if (!streamStarted || textBlockClosed) {
+          return;
+        }
+
+        textBlockClosed = true;
+        const partial = buildNativeOpenAIAssistantMessage(route, accumulatedContent, "stop", usage);
+        stream.push({
+          type: "text_end",
+          contentIndex: 0,
+          content: accumulatedContent,
+          partial,
+        });
+      };
+
+      for await (const chunk of parseOpenAIChatCompletionsSse(response.body.getReader())) {
+        if (chunk.error?.message) {
+          throw new Error(chunk.error.message);
+        }
+
+        const choice = chunk.choices?.[0];
+        const delta =
+          choice?.delta?.content ?? choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? "";
+
+        if (delta) {
+          if (!streamStarted) {
+            streamStarted = true;
+            const emptyPartial = buildNativeOpenAIAssistantMessage(route, "", "stop", usage);
+            stream.push({ type: "start", partial: emptyPartial });
+            stream.push({ type: "text_start", contentIndex: 0, partial: emptyPartial });
+          }
+
+          accumulatedContent += delta;
+          const partial = buildNativeOpenAIAssistantMessage(route, accumulatedContent, "stop", usage);
+          stream.push({
+            type: "text_delta",
+            contentIndex: 0,
+            delta,
+            partial,
+          });
+        }
+
+        if (choice?.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+
+        if (chunk.usage) {
+          usage = {
+            input: chunk.usage.prompt_tokens,
+            output: chunk.usage.completion_tokens,
+            total: chunk.usage.total_tokens,
+          };
+        }
+      }
+
+      closeTextBlock();
+
+      const stopReason: "stop" | "length" = finishReason === "length" ? "length" : "stop";
+      const finalMessage = buildNativeOpenAIAssistantMessage(route, accumulatedContent, stopReason, usage);
+      stream.push({
+        type: "done",
+        reason: stopReason,
+        message: finalMessage,
+      });
+    } catch (error) {
+      stream.push({
+        type: "error",
+        reason: "error",
+        error: {
+          ...buildNativeOpenAIAssistantMessage(route, "", "error"),
           errorMessage: error instanceof Error ? error.message : String(error),
         } as AssistantMessage,
       });
@@ -1104,6 +1364,7 @@ export const __testing = {
   resolveClassifierFailureFallback,
   convertContextToOllamaMessages,
   createNativeOllamaStream,
+  createNativeOpenAICompletionsStream,
 };
 
 // ---------------------------------------------------------------------------
@@ -1313,6 +1574,13 @@ export default definePluginEntry({
                   directToolExposure.context,
                   requestLogger.wrapOptions(options),
                 );
+              } else if (routed.tier === "local" && routed.api === "openai-completions") {
+                stream = createNativeOpenAICompletionsStream(
+                  routed,
+                  directToolExposure.context,
+                  requestLogger.wrapOptions(options),
+                  resolveRouterApiKey(),
+                );
               } else {
                 stream = (await baseStreamFn(
                   directModel as Parameters<typeof baseStreamFn>[0],
@@ -1512,6 +1780,16 @@ export default definePluginEntry({
                   requestLogger.wrapOptions(options),
                   pluginConfig.streamRetryOnFailure ? firstAttemptAbort.signal : undefined,
                 ),
+              );
+            } else if (routed.tier === "local" && routed.api === "openai-completions") {
+              stream = createNativeOpenAICompletionsStream(
+                routed,
+                toolExposure.context,
+                withAbortSignal(
+                  requestLogger.wrapOptions(options),
+                  pluginConfig.streamRetryOnFailure ? firstAttemptAbort.signal : undefined,
+                ),
+                resolveRouterApiKey(),
               );
             } else {
               stream = (await baseStreamFn(
