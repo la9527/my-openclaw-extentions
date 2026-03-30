@@ -186,6 +186,60 @@ async def list_known_faces() -> str:
 
 
 @mcp.tool()
+async def register_face_from_job(
+    photo_id: str,
+    face_idx: int,
+    name: str,
+) -> str:
+    """이전 분류 결과에서 캐시된 얼굴 임베딩을 known person으로 등록합니다.
+
+    Args:
+        photo_id: 사진 식별자 (분류 결과에서 확인)
+        face_idx: 얼굴 인덱스 (0부터 시작)
+        name: 등록할 인물 이름
+
+    Returns:
+        JSON with registration result.
+    """
+    db = _get_job_db()
+    cached = db.load_face_embeddings(photo_id)
+    if not cached:
+        return json.dumps({"error": f"No cached face embeddings for photo {photo_id}"})
+
+    match = [c for c in cached if c["face_idx"] == face_idx]
+    if not match:
+        return json.dumps({
+            "error": f"Face index {face_idx} not found for photo {photo_id}",
+            "available_indices": [c["face_idx"] for c in cached],
+        })
+
+    embedding = match[0]["embedding"]
+    idx = db.save_known_face(name, embedding)
+    return json.dumps({
+        "name": name,
+        "face_idx": idx,
+        "embedding_dim": len(embedding),
+        "source_photo": photo_id,
+        "source_face_idx": face_idx,
+    })
+
+
+@mcp.tool()
+async def delete_known_face(name: str) -> str:
+    """등록된 known person의 모든 얼굴 임베딩을 삭제합니다.
+
+    Args:
+        name: 삭제할 인물 이름
+
+    Returns:
+        JSON with deleted count.
+    """
+    db = _get_job_db()
+    deleted = db.delete_known_face(name)
+    return json.dumps({"name": name, "deleted_embeddings": deleted})
+
+
+@mcp.tool()
 async def rank_best_shots(
     photo_scores_json: str, top_n: int = 10
 ) -> str:
@@ -235,7 +289,7 @@ def _get_job_db() -> JobDB:
 def _get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline()
+        _pipeline = Pipeline(db=_get_job_db())
     return _pipeline
 
 

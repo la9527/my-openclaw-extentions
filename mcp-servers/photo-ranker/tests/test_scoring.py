@@ -17,24 +17,32 @@ from scoring import (
 class TestComputeQualityScore:
     def test_perfect_scores(self):
         qs = compute_quality_score(aesthetic_raw=10.0, technical_raw=50.0)
-        # Sigmoid mapping: score 10 ≈ 49.88 (asymptotic to 50)
+        # Sigmoid mapping: score 10 → ~49.94 (steepness=1.5, center=5.5)
         assert qs.total >= 99.5
         assert qs.aesthetic_score >= 49.5
         assert qs.technical_score == 50.0
 
     def test_zero_scores(self):
         qs = compute_quality_score(aesthetic_raw=0.0, technical_raw=0.0)
-        # Sigmoid mapping: score 0 ≈ 0.12 (asymptotic to 0)
-        assert qs.total <= 0.5
+        # Sigmoid mapping: score 0 → ~0.01 (steeper drop with center=5.5)
+        assert qs.total <= 0.1
 
     def test_midrange(self):
-        qs = compute_quality_score(aesthetic_raw=5.0, technical_raw=25.0)
-        # Sigmoid center at 5.0 → exactly 25.0
+        qs = compute_quality_score(aesthetic_raw=5.5, technical_raw=25.0)
+        # Sigmoid center at 5.5 → exactly 25.0 aesthetic
         assert qs.total == 50.0
 
     def test_photo_id_is_none(self):
         qs = compute_quality_score(0, 0)
         assert qs.photo_id is None
+
+    def test_wider_spread_at_typical_range(self):
+        """LAION 4.5-6.5 should map to a wider spread than before."""
+        qs_low = compute_quality_score(aesthetic_raw=4.5, technical_raw=0.0)
+        qs_high = compute_quality_score(aesthetic_raw=6.5, technical_raw=0.0)
+        spread = qs_high.aesthetic_score - qs_low.aesthetic_score
+        # With steepness=1.5, center=5.5: 4.5→~10.1, 6.5→~39.9 → spread ~29.8
+        assert spread >= 25.0  # much wider than old ~8 spread
 
 
 class TestComputeFamilyScore:

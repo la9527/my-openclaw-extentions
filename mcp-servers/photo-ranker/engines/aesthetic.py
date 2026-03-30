@@ -131,7 +131,12 @@ def score_technical_quality(image_b64: str) -> float:
 
     Uses Laplacian variance for blur detection, histogram analysis for
     exposure, median-diff noise estimation, resolution and color diversity.
+
+    Calibrated so sharp/clean high-res photos score ~45-50 and
+    blurry/noisy low-res photos drop to ~5-15 (wider spread).
     """
+    import math
+
     from PIL import Image, ImageFilter, ImageStat
 
     img_bytes = base64.b64decode(image_b64)
@@ -139,18 +144,26 @@ def score_technical_quality(image_b64: str) -> float:
     color = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
     # 1. Blur detection via Laplacian variance (0-15)
+    # sqrt scaling spreads the mid-range: blurry(~50)→3.8, moderate(~200)→7.5,
+    # sharp(~500)→11.9, very-sharp(~800+)→15.0
     laplacian = gray.filter(ImageFilter.FIND_EDGES)
     lap_stat = ImageStat.Stat(laplacian)
     lap_var = lap_stat.var[0]
-    blur_score = min(15.0, lap_var / 40.0 * 15.0)
+    blur_score = min(15.0, math.sqrt(lap_var / 800.0) * 15.0)
 
     # 2. Exposure: check histogram spread (0-15)
     hist = gray.histogram()
     total_pixels = sum(hist)
     dark_pct = sum(hist[:20]) / total_pixels
     bright_pct = sum(hist[235:]) / total_pixels
-    exposure_penalty = (dark_pct + bright_pct) * 15.0
-    exposure_score = max(0.0, 15.0 - exposure_penalty)
+    # Penalize clipped highlights/shadows
+    clip_penalty = (dark_pct + bright_pct) * 15.0
+    # Also penalize low-contrast (histogram concentrated in narrow band)
+    p5 = sum(hist[:int(256 * 0.05)]) / total_pixels
+    p95 = sum(hist[int(256 * 0.95):]) / total_pixels
+    mid_pct = 1.0 - p5 - p95
+    contrast_penalty = max(0.0, (0.6 - mid_pct) * 5.0) if mid_pct < 0.6 else 0.0
+    exposure_score = max(0.0, 15.0 - clip_penalty - contrast_penalty)
 
     # 3. Noise estimation via median filter residual (0-10)
     median = gray.filter(ImageFilter.MedianFilter(size=3))
@@ -162,11 +175,11 @@ def score_technical_quality(image_b64: str) -> float:
     # low noise_std = clean image (high score), high noise_std = noisy (low score)
     noise_score = max(0.0, min(10.0, 10.0 - noise_std * 0.8))
 
-    # 4. Resolution score (0-5): higher resolution = more detail
+    # 4. Resolution score (0-5): sqrt-scaled for better low-res discrimination
+    # 0.1MP→0.63, 0.5MP→1.41, 1MP→2.0, 4MP→4.0, 6.25MP+→5.0
     w, h = color.size
     megapixels = (w * h) / 1_000_000
-    # 0.5MP=1, 2MP=3, 5MP+=5
-    resolution_score = min(5.0, megapixels * 1.0)
+    resolution_score = min(5.0, math.sqrt(megapixels) * 2.0)
 
     # 5. Color diversity / saturation (0-5)
     hsv = color.convert("HSV")

@@ -330,3 +330,69 @@ class TestGPSTravelCorrection:
         )
         assert cand.latitude == 37.5665
         assert cand.longitude == 126.978
+
+
+class TestFaceEmbeddingCache:
+    """Test that pipeline caches face embeddings in DB when provided."""
+
+    def test_pipeline_accepts_db_param(self):
+        """Pipeline should accept optional db parameter."""
+        pipe = Pipeline(db=None)
+        assert pipe._db is None
+
+    def test_pipeline_caches_embeddings(self):
+        """When db is provided, pipeline should save face embeddings."""
+        from unittest.mock import MagicMock
+
+        mock_db = MagicMock()
+        pipe = Pipeline(db=mock_db)
+
+        # Verify db is stored
+        assert pipe._db is mock_db
+
+    @pytest.mark.asyncio
+    async def test_stage1_saves_embeddings_to_db(self, sample_photos):
+        """_stage1 should call db.save_face_embedding for detected faces."""
+        from models import FaceResult
+        from unittest.mock import MagicMock
+
+        mock_db = MagicMock()
+        pipe = Pipeline(db=mock_db)
+
+        # Mock face engine to return faces with embeddings
+        fake_faces = [
+            FaceResult(bbox=(10, 100, 80, 20), embedding=[0.1] * 128, gender="male", age=30),
+            FaceResult(bbox=(10, 200, 80, 120), embedding=[0.2] * 128),
+        ]
+        with patch.object(pipe._face, "detect_faces", return_value=fake_faces):
+            with patch.object(pipe._exif, "extract") as mock_exif:
+                mock_exif.return_value = MagicMock(
+                    has_gps=False, latitude=None, longitude=None, orientation=1
+                )
+                cand = await pipe._stage1("photo_1", sample_photos[0]["image_b64"])
+
+        # Should have called save_face_embedding twice
+        assert mock_db.save_face_embedding.call_count == 2
+        first_call = mock_db.save_face_embedding.call_args_list[0]
+        # Positional args: (photo_id, face_idx, embedding)
+        assert first_call[0][0] == "photo_1"
+
+    @pytest.mark.asyncio
+    async def test_stage1_no_cache_without_db(self, sample_photos):
+        """Without db, no face embedding caching should happen."""
+        from models import FaceResult
+
+        pipe = Pipeline(db=None)
+
+        fake_faces = [
+            FaceResult(bbox=(10, 100, 80, 20), embedding=[0.1] * 128),
+        ]
+        with patch.object(pipe._face, "detect_faces", return_value=fake_faces):
+            with patch.object(pipe._exif, "extract") as mock_exif:
+                mock_exif.return_value = MagicMock(
+                    has_gps=False, latitude=None, longitude=None, orientation=1
+                )
+                cand = await pipe._stage1("photo_1", sample_photos[0]["image_b64"])
+
+        # Should still detect faces correctly
+        assert cand.face_count == 1

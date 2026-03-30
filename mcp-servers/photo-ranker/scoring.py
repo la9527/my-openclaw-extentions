@@ -44,9 +44,11 @@ def compute_quality_score(
     """
     import math
 
-    # Sigmoid-based mapping to expand differences in the 3-7 range
-    # where most LAION scores cluster. Steepness=1.2, center=5.0.
-    sigmoid = 1.0 / (1.0 + math.exp(-1.2 * (aesthetic_raw - 5.0)))
+    # Sigmoid-based mapping to expand differences in LAION score clusters.
+    # steepness=1.5 (wider spread than 1.2), center=5.5 (corrects high bias
+    # since typical real photos score slightly above 5.0 on LAION).
+    # Range examples: score=3→1.1, 4→4.8, 5→16.0, 5.5→25.0, 6→34.0, 7→45.2
+    sigmoid = 1.0 / (1.0 + math.exp(-1.5 * (aesthetic_raw - 5.5)))
     aesthetic_mapped = sigmoid * 50.0
 
     total = aesthetic_mapped + technical_raw

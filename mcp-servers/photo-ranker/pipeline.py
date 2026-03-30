@@ -18,6 +18,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+import db as db_module
 from engines.aesthetic import score_technical_quality
 from engines.dedup import DedupEngine
 from engines.exif import ExifEngine
@@ -80,11 +81,16 @@ class PipelineConfig:
 class Pipeline:
     """2-stage photo classification pipeline."""
 
-    def __init__(self, config: PipelineConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PipelineConfig | None = None,
+        db: "db_module.JobDB | None" = None,
+    ) -> None:
         self.config = config or PipelineConfig()
         self._dedup = DedupEngine()
         self._face = FaceEngine()
         self._exif = ExifEngine()
+        self._db = db  # Optional DB for face embedding caching
         # Known face embeddings: name -> list of embeddings
         self._known_faces: dict[str, list[list[float]]] = {}
 
@@ -245,6 +251,15 @@ class Pipeline:
         cand.technical_score = tech_score
         cand.face_count = len(faces)
         cand.faces = list(faces)
+
+        # Cache face embeddings in DB for later registration
+        if self._db and faces:
+            for i, f in enumerate(faces):
+                if f.embedding:
+                    self._db.save_face_embedding(
+                        photo_id, i, f.embedding,
+                        gender=f.gender, age=f.age, expression=f.expression,
+                    )
 
         # Known person matching
         embeddings = [f.embedding for f in faces]

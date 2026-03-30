@@ -96,3 +96,89 @@ class TestToolRegistration:
         import server
 
         assert callable(getattr(server, "classify_and_organize", None))
+
+    def test_mcp_has_known_face_tools(self):
+        import server
+
+        assert callable(getattr(server, "register_face", None))
+        assert callable(getattr(server, "list_known_faces", None))
+        assert callable(getattr(server, "register_face_from_job", None))
+        assert callable(getattr(server, "delete_known_face", None))
+
+
+class TestRegisterFaceFromJob:
+    """Test register_face_from_job MCP tool logic."""
+
+    @pytest.mark.asyncio
+    async def test_register_from_cached_embedding(self):
+        """Should register a face from cached embeddings in DB."""
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.load_face_embeddings.return_value = [
+            {"face_idx": 0, "embedding": [0.1] * 512, "gender": "male", "age": 30, "expression": "unknown"},
+            {"face_idx": 1, "embedding": [0.2] * 512, "gender": "female", "age": 28, "expression": "happy"},
+        ]
+        mock_db.save_known_face.return_value = 0
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.register_face_from_job("photo_1", 1, "Alice")
+
+        parsed = json.loads(result)
+        assert parsed["name"] == "Alice"
+        assert parsed["embedding_dim"] == 512
+        assert parsed["source_photo"] == "photo_1"
+        assert parsed["source_face_idx"] == 1
+
+    @pytest.mark.asyncio
+    async def test_register_from_missing_photo(self):
+        """Should return error for missing photo embeddings."""
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.load_face_embeddings.return_value = []
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.register_face_from_job("missing_photo", 0, "Alice")
+
+        parsed = json.loads(result)
+        assert "error" in parsed
+
+    @pytest.mark.asyncio
+    async def test_register_from_wrong_index(self):
+        """Should return error for invalid face_idx."""
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.load_face_embeddings.return_value = [
+            {"face_idx": 0, "embedding": [0.1] * 128, "gender": "", "age": 0, "expression": "unknown"},
+        ]
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.register_face_from_job("photo_1", 5, "Alice")
+
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert 0 in parsed["available_indices"]
+
+
+class TestDeleteKnownFace:
+    """Test delete_known_face MCP tool logic."""
+
+    @pytest.mark.asyncio
+    async def test_delete_known_face(self):
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.delete_known_face.return_value = 3
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.delete_known_face("Alice")
+
+        parsed = json.loads(result)
+        assert parsed["name"] == "Alice"
+        assert parsed["deleted_embeddings"] == 3
