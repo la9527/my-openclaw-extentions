@@ -127,31 +127,54 @@ class AestheticEngine:
 
 
 def score_technical_quality(image_b64: str) -> float:
-    """Estimate technical quality (blur, exposure, noise) 0-50.
+    """Estimate technical quality (blur, exposure, noise, resolution, color) 0-50.
 
-    Uses Laplacian variance for blur detection and histogram
-    analysis for exposure — no heavy ML deps needed.
+    Uses Laplacian variance for blur detection, histogram analysis for
+    exposure, median-diff noise estimation, resolution and color diversity.
     """
     from PIL import Image, ImageFilter, ImageStat
 
     img_bytes = base64.b64decode(image_b64)
-    image = Image.open(io.BytesIO(img_bytes)).convert("L")
+    gray = Image.open(io.BytesIO(img_bytes)).convert("L")
+    color = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-    # Blur detection via Laplacian variance
-    laplacian = image.filter(ImageFilter.FIND_EDGES)
+    # 1. Blur detection via Laplacian variance (0-15)
+    laplacian = gray.filter(ImageFilter.FIND_EDGES)
     lap_stat = ImageStat.Stat(laplacian)
     lap_var = lap_stat.var[0]
+    blur_score = min(15.0, lap_var / 40.0 * 15.0)
 
-    # Normalize: low variance = blurry
-    blur_score = min(25.0, lap_var / 40.0 * 25.0)
-
-    # Exposure: check histogram spread
-    hist = image.histogram()
+    # 2. Exposure: check histogram spread (0-15)
+    hist = gray.histogram()
     total_pixels = sum(hist)
-    # Percentage of pixels in extreme dark/bright regions
     dark_pct = sum(hist[:20]) / total_pixels
     bright_pct = sum(hist[235:]) / total_pixels
-    exposure_penalty = (dark_pct + bright_pct) * 25.0
-    exposure_score = max(0.0, 25.0 - exposure_penalty)
+    exposure_penalty = (dark_pct + bright_pct) * 15.0
+    exposure_score = max(0.0, 15.0 - exposure_penalty)
 
-    return round(blur_score + exposure_score, 2)
+    # 3. Noise estimation via median filter residual (0-10)
+    median = gray.filter(ImageFilter.MedianFilter(size=3))
+    import numpy as np
+
+    gray_arr = np.array(gray, dtype=np.float32)
+    median_arr = np.array(median, dtype=np.float32)
+    noise_std = float(np.std(gray_arr - median_arr))
+    # low noise_std = clean image (high score), high noise_std = noisy (low score)
+    noise_score = max(0.0, min(10.0, 10.0 - noise_std * 0.8))
+
+    # 4. Resolution score (0-5): higher resolution = more detail
+    w, h = color.size
+    megapixels = (w * h) / 1_000_000
+    # 0.5MP=1, 2MP=3, 5MP+=5
+    resolution_score = min(5.0, megapixels * 1.0)
+
+    # 5. Color diversity / saturation (0-5)
+    hsv = color.convert("HSV")
+    s_channel = hsv.split()[1]  # Saturation channel
+    s_stat = ImageStat.Stat(s_channel)
+    avg_saturation = s_stat.mean[0]  # 0-255
+    s_std = s_stat.stddev[0]
+    # High saturation + high diversity = good color
+    color_score = min(5.0, (avg_saturation / 128.0) * 2.5 + (s_std / 64.0) * 2.5)
+
+    return round(blur_score + exposure_score + noise_score + resolution_score + color_score, 2)

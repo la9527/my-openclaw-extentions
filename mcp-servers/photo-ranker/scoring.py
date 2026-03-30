@@ -12,8 +12,11 @@ from models import (
 )
 
 # Weight configuration
-WEIGHT_QUALITY = 0.25
-WEIGHT_FAMILY = 0.30
+# Retuned 2026-03-30: quality now has better spread (5-component technical
+# + sigmoid aesthetic), and face detection fires more reliably (upscale retry
+# + lower confidence), so shift weight from family→quality.
+WEIGHT_QUALITY = 0.30
+WEIGHT_FAMILY = 0.25
 WEIGHT_EVENT = 0.25
 WEIGHT_UNIQUENESS = 0.20
 
@@ -36,10 +39,16 @@ def compute_quality_score(
 ) -> QualityScore:
     """Compute quality score from aesthetic (0-10) and technical (0-50) raw scores.
 
-    aesthetic_raw: LAION score 0-10 → mapped to 0-50
-    technical_raw: blur/exposure 0-50
+    aesthetic_raw: LAION score 0-10 → mapped to 0-50 with sigmoid spread
+    technical_raw: blur/exposure/noise/resolution/color 0-50
     """
-    aesthetic_mapped = (aesthetic_raw / 10.0) * 50.0
+    import math
+
+    # Sigmoid-based mapping to expand differences in the 3-7 range
+    # where most LAION scores cluster. Steepness=1.2, center=5.0.
+    sigmoid = 1.0 / (1.0 + math.exp(-1.2 * (aesthetic_raw - 5.0)))
+    aesthetic_mapped = sigmoid * 50.0
+
     total = aesthetic_mapped + technical_raw
     return QualityScore(
         photo_id=None,

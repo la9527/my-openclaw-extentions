@@ -17,16 +17,19 @@ from scoring import (
 class TestComputeQualityScore:
     def test_perfect_scores(self):
         qs = compute_quality_score(aesthetic_raw=10.0, technical_raw=50.0)
-        assert qs.total == 100.0
-        assert qs.aesthetic_score == 50.0
+        # Sigmoid mapping: score 10 ≈ 49.88 (asymptotic to 50)
+        assert qs.total >= 99.5
+        assert qs.aesthetic_score >= 49.5
         assert qs.technical_score == 50.0
 
     def test_zero_scores(self):
         qs = compute_quality_score(aesthetic_raw=0.0, technical_raw=0.0)
-        assert qs.total == 0.0
+        # Sigmoid mapping: score 0 ≈ 0.12 (asymptotic to 0)
+        assert qs.total <= 0.5
 
     def test_midrange(self):
         qs = compute_quality_score(aesthetic_raw=5.0, technical_raw=25.0)
+        # Sigmoid center at 5.0 → exactly 25.0
         assert qs.total == 50.0
 
     def test_photo_id_is_none(self):

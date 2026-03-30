@@ -69,7 +69,7 @@ class FaceEngine:
 
             opts = vision.FaceDetectorOptions(
                 base_options=BaseOptions(model_asset_path=str(model_path)),
-                min_detection_confidence=0.5,
+                min_detection_confidence=0.3,
             )
             self._mp_detector = vision.FaceDetector.create_from_options(opts)
             self._backend = "mediapipe"
@@ -100,11 +100,52 @@ class FaceEngine:
         return bool(self._backend)
 
     def detect_faces(self, image_b64: str) -> list[FaceResult]:
-        """Detect faces and return locations + embeddings."""
+        """Detect faces and return locations + embeddings.
+
+        If no faces found on first pass and image is small, retries
+        with 2x upscale to catch distant/small faces in group shots.
+        """
         self._check_available()
         if not self._backend:
             return []
 
+        results = self._detect_dispatch(image_b64)
+
+        # Retry with 2x upscale for distant faces in group shots
+        if not results:
+            from PIL import Image
+
+            try:
+                img_bytes = base64.b64decode(image_b64)
+                image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                w, h = image.size
+                # Only upscale if image is relatively small (< 1600px)
+                if max(w, h) < 1600:
+                    scale = min(2.0, 1600 / max(w, h))
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    upscaled = image.resize((new_w, new_h), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    upscaled.save(buf, format="JPEG", quality=90)
+                    upscaled_b64 = base64.b64encode(buf.getvalue()).decode()
+                    results = self._detect_dispatch(upscaled_b64)
+                    if results:
+                        # Scale bboxes back to original coordinates
+                        for r in results:
+                            t, ri, b, l = r.bbox
+                            r.bbox = (
+                                int(t / scale),
+                                int(ri / scale),
+                                int(b / scale),
+                                int(l / scale),
+                            )
+                        logger.debug("Upscale retry found %d faces", len(results))
+            except Exception:
+                pass
+
+        return results
+
+    def _detect_dispatch(self, image_b64: str) -> list[FaceResult]:
+        """Dispatch to the active backend."""
         if self._backend == "insightface":
             return self._detect_insightface(image_b64)
         if self._backend == "mediapipe":
