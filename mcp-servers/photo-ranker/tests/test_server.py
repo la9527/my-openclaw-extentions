@@ -81,3 +81,18 @@ class TestToolRegistration:
         assert callable(getattr(server, "classify_event", None))
         assert callable(getattr(server, "find_duplicates", None))
         assert callable(getattr(server, "rank_best_shots", None))
+
+    def test_mcp_has_album_tools(self):
+        import server
+
+        assert callable(getattr(server, "create_album", None))
+        assert callable(getattr(server, "add_to_album", None))
+        assert callable(getattr(server, "organize_results", None))
+        assert callable(getattr(server, "import_photos", None))
+        assert callable(getattr(server, "import_and_organize", None))
+        assert callable(getattr(server, "list_photo_albums", None))
+
+    def test_mcp_has_workflow_tool(self):
+        import server
+
+        assert callable(getattr(server, "classify_and_organize", None))

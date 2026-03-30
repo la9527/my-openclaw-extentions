@@ -526,5 +526,104 @@ async def import_and_organize(
     return json.dumps(result)
 
 
+@mcp.tool()
+async def list_photo_albums() -> str:
+    """Apple Photos의 모든 앨범 목록을 반환합니다.
+
+    Returns:
+        JSON array of {name, uuid, count}.
+    """
+    writer = _get_album_writer()
+    albums = writer.list_albums()
+    return json.dumps(albums)
+
+
+# ── End-to-End Workflow Tools ──────────────────────────
+
+
+@mcp.tool()
+async def classify_and_organize(
+    source: str,
+    source_path: str,
+    album_prefix: str = "AI 분류",
+    folder: str = "",
+    min_score: float = 0.0,
+    album: str = "",
+    person: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 100,
+) -> str:
+    """사진 소스에서 불러와 분류하고 Apple Photos 앨범으로 정리하는 전체 워크플로우.
+
+    End-to-end: source → classify → organize into albums.
+
+    Args:
+        source: 소스 종류 — "local", "apple"
+        source_path: 디렉터리 경로 (local) 또는 앨범 이름 (apple)
+        album_prefix: 생성할 앨범 이름 접두사
+        folder: 앨범을 넣을 폴더 경로 (예: "AI 분류/2026-03")
+        min_score: 최소 점수 (이하 건너뜀)
+        album: Apple Photos 앨범 필터
+        person: Apple Photos 인물 필터
+        date_from: 시작 날짜 (ISO)
+        date_to: 종료 날짜 (ISO)
+        limit: 최대 처리 사진 수
+
+    Returns:
+        JSON with job_id, ranked_count, albums_created, photos_organized.
+    """
+    from sources import load_photos as _load
+
+    # 1. Load photos from source
+    photos = _load(
+        source,
+        source_path,
+        album=album,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    if not photos:
+        return json.dumps({"error": "No photos found from source"})
+
+    # 2. Classify via pipeline
+    pipe = _get_pipeline()
+    db = _get_job_db()
+
+    # Load known faces
+    known = db.load_known_faces()
+    for name, embeddings in known.items():
+        for emb in embeddings:
+            pipe.register_known_face(name, emb)
+
+    # Create job for tracking
+    queue = _get_job_queue()
+    job = queue.create_job(source, source_path)
+    db.save_job(job)
+
+    ranked = await pipe.run(photos, job)
+    results = [r.to_dict() for r in ranked]
+    db.save_photo_results(job.id, results)
+    db.save_job(job)
+
+    # 3. Organize into albums
+    if source == "apple" and results:
+        writer = _get_album_writer()
+        album_result = writer.organize_by_classification(
+            results, album_prefix, folder, min_score
+        )
+    else:
+        album_result = {"albums_created": [], "photos_organized": 0, "skipped": 0}
+
+    return json.dumps({
+        "job_id": job.id,
+        "ranked_count": len(ranked),
+        "top_score": ranked[0].total_score if ranked else 0,
+        **album_result,
+    })
+
+
 if __name__ == "__main__":
     mcp.run()
