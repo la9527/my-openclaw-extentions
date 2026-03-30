@@ -4,6 +4,8 @@
 Usage:
     uv run batch_classify.py --source local --path /photos/2025
     uv run batch_classify.py --source local --path /photos --min-quality 15
+    uv run batch_classify.py --source apple --path "Family" --limit 50
+    uv run batch_classify.py --source apple --album "Vacation" --person "Mom" --date-from 2025-01-01
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import time
 from db import JobDB
 from jobs import Job, JobQueue, JobStatus
 from pipeline import Pipeline, PipelineConfig
+from sources import load_photos
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,34 +29,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_photos_from_local(path: str, limit: int = 0) -> list[dict]:
-    """Load photos from local directory as photo_id + image_b64."""
-    import base64
-    from pathlib import Path
-
-    from PIL import Image
-    import io
-
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff"}
-    root = Path(path)
-    photos = []
-
-    for f in sorted(root.rglob("*")):
-        if f.suffix.lower() not in IMAGE_EXTS or not f.is_file():
-            continue
-        try:
-            img = Image.open(f)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG")
-            b64 = base64.b64encode(buf.getvalue()).decode()
-            photos.append({"photo_id": str(f), "image_b64": b64})
-        except Exception as e:
-            logger.warning("Skip %s: %s", f, e)
-
-        if limit and len(photos) >= limit:
-            break
-
-    return photos
+def _load_photos_for_batch(args: argparse.Namespace) -> list[dict]:
+    """Load photos using sources.load_photos with CLI arguments."""
+    return load_photos(
+        source=args.source,
+        source_path=args.path or "",
+        album=getattr(args, "album", "") or "",
+        person=getattr(args, "person", "") or "",
+        date_from=getattr(args, "date_from", "") or "",
+        date_to=getattr(args, "date_to", "") or "",
+        limit=args.limit if args.limit else 10000,
+    )
 
 
 async def run_batch(args: argparse.Namespace) -> None:
@@ -66,12 +52,8 @@ async def run_batch(args: argparse.Namespace) -> None:
     db = JobDB(args.db_path) if args.db_path else JobDB()
 
     # Load photos
-    logger.info("Loading photos from %s: %s", args.source, args.path)
-    if args.source == "local":
-        photos = _load_photos_from_local(args.path, args.limit)
-    else:
-        logger.error("Batch CLI currently supports --source local only")
-        sys.exit(1)
+    logger.info("Loading photos from %s: %s", args.source, args.path or "(default)")
+    photos = _load_photos_for_batch(args)
 
     if not photos:
         logger.warning("No photos found")
@@ -83,7 +65,7 @@ async def run_batch(args: argparse.Namespace) -> None:
     job = Job(
         id=f"batch-{int(time.time())}",
         source=args.source,
-        source_path=args.path,
+        source_path=args.path or "",
     )
     db.save_job(job)
 
@@ -136,13 +118,33 @@ def main():
     parser.add_argument(
         "--source",
         default="local",
-        choices=["local"],
+        choices=["local", "apple"],
         help="Photo source (default: local)",
     )
     parser.add_argument(
         "--path",
-        required=True,
-        help="Directory path to scan",
+        default="",
+        help="Directory path (local) or album hint (apple)",
+    )
+    parser.add_argument(
+        "--album",
+        default="",
+        help="Apple Photos album name filter",
+    )
+    parser.add_argument(
+        "--person",
+        default="",
+        help="Apple Photos person name filter",
+    )
+    parser.add_argument(
+        "--date-from",
+        default="",
+        help="Start date filter (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--date-to",
+        default="",
+        help="End date filter (YYYY-MM-DD)",
     )
     parser.add_argument(
         "--limit",
@@ -185,6 +187,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.source == "local" and not args.path:
+        parser.error("--path is required for --source local")
+
     asyncio.run(run_batch(args))
 
 
