@@ -73,6 +73,20 @@ class TestComputeFamilyScore:
         score = compute_family_score(faces)
         assert score == 10.0
 
+    def test_smiling_expression_bonus(self):
+        """smiling, laughing, joyful, excited also count as positive."""
+        for expr in ["smiling", "laughing", "joyful", "excited"]:
+            faces = [FaceResult(bbox=(0, 0, 0, 0), expression=expr)]
+            score = compute_family_score(faces)
+            assert score == 10.0, f"{expr} should give +10 bonus"
+
+    def test_neutral_expression_no_bonus(self):
+        """neutral/unknown/serious should NOT get expression bonus."""
+        for expr in ["unknown", "neutral", "serious"]:
+            faces = [FaceResult(bbox=(0, 0, 0, 0), expression=expr)]
+            score = compute_family_score(faces)
+            assert score == 0.0, f"{expr} should not give bonus"
+
     def test_known_person_plus_expression(self):
         """Known person + happy expression should stack."""
         faces = [

@@ -78,9 +78,12 @@ def compute_family_score(
     if known_person_names:
         score += min(100.0, len(known_person_names) * 25.0)
 
-    # expression bonus (placeholder — face engine currently returns "unknown")
-    happy_count = sum(1 for f in faces if f.expression == "happy")
-    score += happy_count * 10.0
+    # expression bonus: positive expressions boost family photo value
+    _POSITIVE_EXPRESSIONS = {"happy", "smiling", "laughing", "joyful", "excited"}
+    positive_count = sum(
+        1 for f in faces if f.expression.lower() in _POSITIVE_EXPRESSIONS
+    )
+    score += positive_count * 10.0
 
     return min(100.0, score)
 

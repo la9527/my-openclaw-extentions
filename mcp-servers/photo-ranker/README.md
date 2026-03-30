@@ -73,6 +73,32 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | `cancel_job` | 실행/대기 중인 작업 취소 | `job_id` |
 | `list_jobs` | 작업 목록 조회 | `status?` ("pending"/"running"/"completed"/"failed"/"cancelled") |
 
+### 인물 관리 도구 (4개)
+
+| 도구 | 설명 | 주요 파라미터 |
+|---|---|---|
+| `register_face` | 이미지에서 얼굴을 감지하여 known person 등록 | `image_b64`, `name` |
+| `register_face_from_job` | 이전 분류 결과의 캐시된 임베딩으로 등록 | `photo_id`, `face_idx`, `name` |
+| `list_known_faces` | 등록된 인물 목록 조회 | — |
+| `delete_known_face` | 등록된 인물의 모든 임베딩 삭제 | `name` |
+
+### Apple Photos 앨범 도구 (6개)
+
+| 도구 | 설명 | 주요 파라미터 |
+|---|---|---|
+| `create_album` | Apple Photos에 앨범 생성 | `name`, `folder?` |
+| `add_to_album` | 기존 라이브러리 사진을 앨범에 추가 (복제 없음) | `photo_uuids_json`, `album_name`, `folder?` |
+| `organize_results` | 분류 결과를 이벤트별 앨범으로 자동 정리 | `job_id`, `album_prefix?`, `min_score?` |
+| `import_photos` | 외부 사진을 Photos 라이브러리에 가져오기 | `photo_paths_json`, `album_name?` |
+| `import_and_organize` | 외부 사진 가져오기 + 분류별 앨범 정리 | `photo_paths_json`, `results_json` |
+| `list_photo_albums` | Apple Photos 앨범 목록 조회 | — |
+
+### E2E 워크플로우 도구 (1개)
+
+| 도구 | 설명 | 주요 파라미터 |
+|---|---|---|
+| `classify_and_organize` | 소스 → 분류 → 앨범 정리 전체 워크플로우 | `source`, `source_path`, `album_prefix?`, `limit?` |
+
 ## 점수 체계
 
 최종 랭킹은 4가지 차원의 가중 합산으로 결정됩니다:
@@ -111,7 +137,7 @@ uv run batch_classify.py \
 
 ```
 photo-ranker/
-├── server.py           # MCP 서버 엔트리포인트 (17개 도구)
+├── server.py           # MCP 서버 엔트리포인트 (22개 도구)
 ├── engines/
 │   ├── vlm.py          # Qwen2.5-VL 장면 묘사 엔진
 │   ├── aesthetic.py    # CLIP + LAION + 5-component 기술 품질 엔진
@@ -126,7 +152,7 @@ photo-ranker/
 ├── db.py               # SQLite 영속성 (WAL 모드)
 ├── batch_classify.py   # 배치 CLI
 ├── pyproject.toml
-└── tests/              # 160개 테스트
+└── tests/              # 179개+ 테스트
 ```
 
 ## 테스트

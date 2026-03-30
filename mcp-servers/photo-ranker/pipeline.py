@@ -91,6 +91,8 @@ class Pipeline:
         self._face = FaceEngine()
         self._exif = ExifEngine()
         self._db = db  # Optional DB for face embedding caching
+        self._vlm = None  # Lazy-initialized VLMEngine (reused across stage2 calls)
+        self._aesthetic = None  # Lazy-initialized AestheticEngine
         # Known face embeddings: name -> list of embeddings
         self._known_faces: dict[str, list[list[float]]] = {}
 
@@ -277,9 +279,10 @@ class Pipeline:
         try:
             from engines.vlm import VLMEngine
 
-            model_path = self.config.vlm_model_path or None
-            vlm = VLMEngine(model_path) if model_path else VLMEngine()
-            scene = vlm.describe_scene(cand.image_b64)
+            if self._vlm is None:
+                model_path = self.config.vlm_model_path or None
+                self._vlm = VLMEngine(model_path) if model_path else VLMEngine()
+            scene = self._vlm.describe_scene(cand.image_b64)
             cand.scene_description = scene.scene
             cand.event_type = scene.event_type.value
             cand.event_score = compute_event_score(scene)
@@ -321,20 +324,35 @@ class Pipeline:
 
             # B-2: Apply VLM expressions to detected faces for scoring
             if scene.expressions and cand.faces:
-                for i, expr in enumerate(scene.expressions):
-                    if i < len(cand.faces):
-                        cand.faces[i].expression = expr.lower()
+                # Map expressions to faces: handle count mismatch
+                expr_list = [e.lower() for e in scene.expressions]
+                for i, face in enumerate(cand.faces):
+                    if i < len(expr_list):
+                        face.expression = expr_list[i]
+                    elif expr_list:
+                        # More faces than expressions: apply majority expression
+                        face.expression = max(set(expr_list), key=expr_list.count)
                 # Recompute family score with expression data
                 cand.family_score = compute_family_score(
                     cand.faces, cand.known_persons or None
                 )
+            elif scene.expressions and not cand.faces and scene.people_count > 0:
+                # VLM saw people but face engine didn't — still use expression info
+                # as a small family_score boost if positive expressions present
+                positive = {"happy", "smiling", "laughing", "joyful", "excited"}
+                pos_count = sum(
+                    1 for e in scene.expressions if e.lower() in positive
+                )
+                if pos_count > 0:
+                    cand.family_score = min(100.0, cand.family_score + pos_count * 5.0)
 
             # Re-score quality with real aesthetic if available
             try:
                 from engines.aesthetic import AestheticEngine
 
-                ae = AestheticEngine()
-                aesthetic_raw = ae.score(cand.image_b64)
+                if self._aesthetic is None:
+                    self._aesthetic = AestheticEngine()
+                aesthetic_raw = self._aesthetic.score(cand.image_b64)
                 qs = compute_quality_score(aesthetic_raw, cand.technical_score)
                 cand.quality_score = qs.total
             except RuntimeError:
