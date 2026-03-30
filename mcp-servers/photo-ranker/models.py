@@ -106,9 +106,11 @@ class RankedPhoto:
     faces_detected: int
     known_persons: list[str] = field(default_factory=list)
     has_gps: bool = False
+    meaningful_score: int = 5
+    capture_date: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "photo_id": self.photo_id,
             "total_score": round(self.total_score, 2),
             "quality_score": round(self.quality_score, 2),
@@ -120,4 +122,8 @@ class RankedPhoto:
             "faces_detected": self.faces_detected,
             "known_persons": self.known_persons,
             "has_gps": self.has_gps,
+            "meaningful_score": self.meaningful_score,
         }
+        if self.capture_date:
+            d["capture_date"] = self.capture_date
+        return d

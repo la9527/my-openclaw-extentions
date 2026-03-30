@@ -60,6 +60,8 @@ class PhotoCandidate:
     latitude: float | None = None
     longitude: float | None = None
     faces: list = field(default_factory=list)  # FaceResult list from stage1
+    meaningful_score: int = 5  # VLM 1-10, default midpoint
+    capture_date: str = ""  # ISO date from EXIF
 
 
 @dataclass
@@ -155,14 +157,29 @@ class Pipeline:
         if job:
             job.progress = JobProgress(total=len(photos), stage="filter")
 
+        # Load existing checkpoints for resume support
+        s1_done: dict[str, dict] = {}
+        s2_done: dict[str, dict] = {}
+        if self._db and job:
+            s1_done = self._db.load_checkpoints(job.id, "filter")
+            s2_done = self._db.load_checkpoints(job.id, "vlm")
+
         # ── Stage 1: Filter ──
         candidates = []
         for i, p in enumerate(photos):
-            cand = await self._stage1(p["photo_id"], p["image_b64"])
+            pid = p["photo_id"]
+            if pid in s1_done:
+                cand = self._restore_candidate(s1_done[pid], p["image_b64"])
+            else:
+                cand = await self._stage1(pid, p["image_b64"])
+                if self._db and job:
+                    self._db.save_checkpoint(
+                        job.id, "filter", pid, self._snapshot_candidate(cand),
+                    )
             candidates.append(cand)
             if job:
                 job.progress.completed = i + 1
-                job.progress.current_file = p["photo_id"]
+                job.progress.current_file = pid
 
         # Duplicate detection across all
         dup_groups = self._detect_duplicates(candidates)
@@ -200,7 +217,15 @@ class Pipeline:
             job.progress.total = len(stage2_candidates)
 
         for i, cand in enumerate(stage2_candidates):
-            await self._stage2(cand)
+            if cand.photo_id in s2_done:
+                self._apply_vlm_checkpoint(cand, s2_done[cand.photo_id])
+            else:
+                await self._stage2(cand)
+                if self._db and job:
+                    self._db.save_checkpoint(
+                        job.id, "vlm", cand.photo_id,
+                        self._snapshot_candidate(cand),
+                    )
             if job:
                 job.progress.completed = i + 1
                 job.progress.current_file = cand.photo_id
@@ -216,6 +241,10 @@ class Pipeline:
                 "ranked_count": len(ranked),
             }
 
+        # Clear checkpoints on successful completion
+        if self._db and job:
+            self._db.clear_checkpoints(job.id)
+
         return ranked
 
     async def _stage1(self, photo_id: str, image_b64: str) -> PhotoCandidate:
@@ -230,6 +259,8 @@ class Pipeline:
         cand.has_gps = exif_data.has_gps
         cand.latitude = exif_data.latitude
         cand.longitude = exif_data.longitude
+        if exif_data.capture_date:
+            cand.capture_date = exif_data.capture_date.strftime("%Y-%m-%d")
         if exif_data.orientation != 1:
             corrected = self._exif.correct_orientation(image_b64)
             cand.image_b64 = corrected
@@ -286,6 +317,7 @@ class Pipeline:
             cand.scene_description = scene.scene
             cand.event_type = scene.event_type.value
             cand.event_score = compute_event_score(scene)
+            cand.meaningful_score = scene.meaningful_score
 
             # A-1: GPS travel correction — if VLM says outdoor but EXIF has GPS,
             # boost toward travel (tourists usually have GPS-tagged photos)
@@ -361,6 +393,57 @@ class Pipeline:
         except RuntimeError as e:
             logger.warning("VLM not available for %s: %s", cand.photo_id, e)
 
+    @staticmethod
+    def _snapshot_candidate(cand: PhotoCandidate) -> dict:
+        """Serialize candidate fields for checkpoint (excludes image_b64)."""
+        return {
+            "photo_id": cand.photo_id,
+            "technical_score": cand.technical_score,
+            "face_count": cand.face_count,
+            "is_duplicate": cand.is_duplicate,
+            "quality_score": cand.quality_score,
+            "family_score": cand.family_score,
+            "event_score": cand.event_score,
+            "uniqueness_score": cand.uniqueness_score,
+            "scene_description": cand.scene_description,
+            "event_type": cand.event_type,
+            "known_persons": cand.known_persons,
+            "passed_stage1": cand.passed_stage1,
+            "has_gps": cand.has_gps,
+            "meaningful_score": cand.meaningful_score,
+            "capture_date": cand.capture_date,
+        }
+
+    @staticmethod
+    def _restore_candidate(snap: dict, image_b64: str) -> PhotoCandidate:
+        """Recreate a PhotoCandidate from a checkpoint snapshot."""
+        cand = PhotoCandidate(photo_id=snap["photo_id"], image_b64=image_b64)
+        cand.technical_score = snap.get("technical_score", 0.0)
+        cand.face_count = snap.get("face_count", 0)
+        cand.is_duplicate = snap.get("is_duplicate", False)
+        cand.quality_score = snap.get("quality_score", 0.0)
+        cand.family_score = snap.get("family_score", 0.0)
+        cand.event_score = snap.get("event_score", 0.0)
+        cand.uniqueness_score = snap.get("uniqueness_score", 0.0)
+        cand.scene_description = snap.get("scene_description", "")
+        cand.event_type = snap.get("event_type", EventType.OTHER.value)
+        cand.known_persons = snap.get("known_persons", [])
+        cand.passed_stage1 = snap.get("passed_stage1", True)
+        cand.has_gps = snap.get("has_gps", False)
+        cand.meaningful_score = snap.get("meaningful_score", 5)
+        cand.capture_date = snap.get("capture_date", "")
+        return cand
+
+    @staticmethod
+    def _apply_vlm_checkpoint(cand: PhotoCandidate, snap: dict) -> None:
+        """Apply VLM stage checkpoint data onto an existing candidate."""
+        cand.scene_description = snap.get("scene_description", "")
+        cand.event_type = snap.get("event_type", cand.event_type)
+        cand.event_score = snap.get("event_score", cand.event_score)
+        cand.quality_score = snap.get("quality_score", cand.quality_score)
+        cand.family_score = snap.get("family_score", cand.family_score)
+        cand.meaningful_score = snap.get("meaningful_score", cand.meaningful_score)
+
     def _detect_duplicates(
         self, candidates: list[PhotoCandidate]
     ) -> list[DuplicateGroup]:
@@ -403,8 +486,11 @@ class Pipeline:
                     faces_detected=c.face_count,
                     known_persons=c.known_persons,
                     has_gps=c.has_gps,
+                    meaningful_score=c.meaningful_score,
+                    capture_date=c.capture_date,
                 )
             )
 
-        ranked.sort(key=lambda r: r.total_score, reverse=True)
+        # Primary: total_score desc, tiebreaker: meaningful_score desc
+        ranked.sort(key=lambda r: (r.total_score, r.meaningful_score), reverse=True)
         return ranked

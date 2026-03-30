@@ -509,6 +509,7 @@ async def organize_results(
     album_prefix: str = "AI 분류",
     folder: str = "",
     min_score: float = 0.0,
+    group_by_date: bool = False,
 ) -> str:
     """분류 완료된 Job 결과를 이벤트 유형별 앨범으로 자동 정리합니다.
 
@@ -517,6 +518,7 @@ async def organize_results(
         album_prefix: 앨범 이름 접두사 (예: "AI 분류")
         folder: 선택적 폴더 경로
         min_score: 최소 점수 (이하 건너뜀)
+        group_by_date: True이면 이벤트+월별로 앨범 분리 (예: "AI 분류 - travel (2026-03)")
 
     Returns:
         JSON with albums_created, photos_organized, skipped.
@@ -527,7 +529,9 @@ async def organize_results(
         return json.dumps({"error": f"No results for job {job_id}"})
 
     writer = _get_album_writer()
-    result = writer.organize_by_classification(results, album_prefix, folder, min_score)
+    result = writer.organize_by_classification(
+        results, album_prefix, folder, min_score, group_by_date=group_by_date,
+    )
     return json.dumps(result)
 
 
@@ -602,6 +606,7 @@ async def classify_and_organize(
     album_prefix: str = "AI 분류",
     folder: str = "",
     min_score: float = 0.0,
+    group_by_date: bool = False,
     album: str = "",
     person: str = "",
     date_from: str = "",
@@ -618,6 +623,7 @@ async def classify_and_organize(
         album_prefix: 생성할 앨범 이름 접두사
         folder: 앨범을 넣을 폴더 경로 (예: "AI 분류/2026-03")
         min_score: 최소 점수 (이하 건너뜀)
+        group_by_date: True이면 이벤트+월별 앨범 분리
         album: Apple Photos 앨범 필터
         person: Apple Photos 인물 필터
         date_from: 시작 날짜 (ISO)
@@ -666,7 +672,8 @@ async def classify_and_organize(
     if source == "apple" and results:
         writer = _get_album_writer()
         album_result = writer.organize_by_classification(
-            results, album_prefix, folder, min_score
+            results, album_prefix, folder, min_score,
+            group_by_date=group_by_date,
         )
     else:
         album_result = {"albums_created": [], "photos_organized": 0, "skipped": 0}

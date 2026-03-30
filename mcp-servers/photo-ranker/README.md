@@ -152,7 +152,7 @@ photo-ranker/
 ├── db.py               # SQLite 영속성 (WAL 모드)
 ├── batch_classify.py   # 배치 CLI
 ├── pyproject.toml
-└── tests/              # 179개+ 테스트
+└── tests/              # 195개+ 테스트
 ```
 
 ## 테스트

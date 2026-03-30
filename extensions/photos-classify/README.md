@@ -9,6 +9,13 @@ MCP 기반 사진 분류/랭킹/앨범 정리를 OpenClaw에서 사용하기 위
 | **photo-ranker** | 품질 분석, VLM 장면 묘사, 이벤트 분류, 얼굴 인식, 중복 감지, 랭킹 |
 | **photo-source** | Apple Photos, Google Photos, GCS, 로컬 폴더 접근 |
 
+## 슬래시 명령
+
+| 명령 | 설명 |
+|------|------|
+| `/classify [source] [path]` | 사진 분류 워크플로우 실행 (기본 소스: apple) |
+| `/classify-status [job_id]` | 백그라운드 분류 Job 상태 조회 |
+
 ## 설치
 
 ```bash
@@ -28,10 +35,14 @@ openclaw config set plugins.photos-classify.enabled true
 
 ## 주요 도구 (photo-ranker)
 
-- `analyze_photo` – 단일 사진 품질/장면/이벤트 분석
-- `rank_photos` – 여러 사진 종합 랭킹
-- `detect_duplicates` – 중복 사진 감지
+- `score_quality` – 단일 사진 품질 분석
+- `describe_scene` – VLM 장면 묘사
+- `classify_event` – 이벤트 유형 분류
+- `detect_faces` – 얼굴 감지
+- `register_face` – 인물 등록
+- `start_classify_job` – 백그라운드 분류 Job 실행
 - `classify_and_organize` – 분류 후 앨범 정리 E2E 워크플로우
+- `organize_results` – 분류 결과 앨범 정리 (날짜별 그룹핑 지원)
 
 ## 주요 도구 (photo-source)
 

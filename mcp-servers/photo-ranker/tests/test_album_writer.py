@@ -236,6 +236,39 @@ class TestOrganizeByClassification(_AlbumWriterTestBase):
         assert out["skipped"] == 0
         self.writer.add_photos_to_album.assert_not_called()
 
+    def test_group_by_date(self):
+        """group_by_date=True groups by (event_type, YYYY-MM)."""
+        self.writer.add_photos_to_album = MagicMock(
+            return_value={"added": 1, "failed": 0, "errors": []}
+        )
+
+        results = [
+            {"photo_id": "p1", "event_type": "travel", "total_score": 5.0, "capture_date": "2026-03-15"},
+            {"photo_id": "p2", "event_type": "travel", "total_score": 4.0, "capture_date": "2026-04-01"},
+            {"photo_id": "p3", "event_type": "travel", "total_score": 3.0, "capture_date": "2026-03-20"},
+        ]
+
+        out = self.writer.organize_by_classification(results, "Test", group_by_date=True)
+        assert len(out["albums_created"]) == 2
+        assert "Test - travel (2026-03)" in out["albums_created"]
+        assert "Test - travel (2026-04)" in out["albums_created"]
+
+    def test_group_by_date_missing_date_falls_back(self):
+        """Photos without capture_date are grouped by event_type only."""
+        self.writer.add_photos_to_album = MagicMock(
+            return_value={"added": 1, "failed": 0, "errors": []}
+        )
+
+        results = [
+            {"photo_id": "p1", "event_type": "meal", "total_score": 5.0, "capture_date": "2026-03-15"},
+            {"photo_id": "p2", "event_type": "meal", "total_score": 4.0},
+        ]
+
+        out = self.writer.organize_by_classification(results, "Test", group_by_date=True)
+        assert len(out["albums_created"]) == 2
+        assert "Test - meal (2026-03)" in out["albums_created"]
+        assert "Test - meal" in out["albums_created"]
+
 
 # ── Import External Photos Tests ───────────────────────
 

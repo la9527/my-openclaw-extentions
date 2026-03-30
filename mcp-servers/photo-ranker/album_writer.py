@@ -163,6 +163,7 @@ class AlbumWriter:
         album_prefix: str = "AI 분류",
         folder: str = "",
         min_score: float = 0.0,
+        group_by_date: bool = False,
     ) -> dict:
         """Organize classified photos into albums by event type.
 
@@ -171,13 +172,14 @@ class AlbumWriter:
             album_prefix: Prefix for album names (e.g. "AI 분류").
             folder: Optional folder for albums.
             min_score: Minimum score threshold (skip lower scored photos).
+            group_by_date: If True, group by (event_type, YYYY-MM) instead of event_type only.
 
         Returns:
             {"albums_created": list, "photos_organized": int, "skipped": int}
         """
         self._ensure_lib()
 
-        # Group by event_type
+        # Group by event_type (and optionally date)
         groups: dict[str, list[str]] = {}
         skipped = 0
 
@@ -187,16 +189,26 @@ class AlbumWriter:
                 continue
 
             event = r.get("event_type", "other")
-            if event not in groups:
-                groups[event] = []
-            groups[event].append(r["photo_id"])
+            if group_by_date and r.get("capture_date"):
+                # capture_date is "YYYY-MM-DD"; bucket by month
+                date_bucket = r["capture_date"][:7]  # "YYYY-MM"
+                key = f"{event}|{date_bucket}"
+            else:
+                key = event
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(r["photo_id"])
 
         # Create albums and assign photos
         albums_created = []
         total_organized = 0
 
-        for event_type, photo_ids in groups.items():
-            album_name = f"{album_prefix} - {event_type}"
+        for key, photo_ids in groups.items():
+            if "|" in key:
+                event_type, date_bucket = key.split("|", 1)
+                album_name = f"{album_prefix} - {event_type} ({date_bucket})"
+            else:
+                album_name = f"{album_prefix} - {key}"
             result = self.add_photos_to_album(photo_ids, album_name, folder)
             albums_created.append(album_name)
             total_organized += result["added"]

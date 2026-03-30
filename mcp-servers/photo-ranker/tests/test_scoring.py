@@ -237,3 +237,20 @@ class TestRankPhotos:
         ]
         ranked = rank_photos(scores)
         assert ranked[0].total_score == 0.0
+
+    def test_meaningful_score_tiebreaker(self):
+        """When total scores are equal, higher meaningful_score ranks first."""
+        scores = [
+            {**self._make_score("low_m", quality_score=50), "meaningful_score": 3},
+            {**self._make_score("high_m", quality_score=50), "meaningful_score": 9},
+        ]
+        ranked = rank_photos(scores)
+        assert ranked[0].photo_id == "high_m"
+        assert ranked[0].meaningful_score == 9
+
+    def test_capture_date_propagated(self):
+        scores = [
+            {**self._make_score("p1"), "capture_date": "2026-03-15"},
+        ]
+        ranked = rank_photos(scores)
+        assert ranked[0].capture_date == "2026-03-15"

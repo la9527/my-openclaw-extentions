@@ -396,3 +396,45 @@ class TestFaceEmbeddingCache:
 
         # Should still detect faces correctly
         assert cand.face_count == 1
+
+
+class TestPhotoCandidateNewFields:
+    def test_meaningful_score_default(self):
+        c = PhotoCandidate(photo_id="x", image_b64="aaa")
+        assert c.meaningful_score == 5
+        assert c.capture_date == ""
+
+    def test_snapshot_and_restore(self):
+        c = PhotoCandidate(photo_id="p1", image_b64="dummyb64")
+        c.technical_score = 35.0
+        c.event_type = "travel"
+        c.meaningful_score = 8
+        c.capture_date = "2026-03-15"
+        c.has_gps = True
+
+        snap = Pipeline._snapshot_candidate(c)
+        assert snap["meaningful_score"] == 8
+        assert snap["capture_date"] == "2026-03-15"
+        assert "image_b64" not in snap
+
+        restored = Pipeline._restore_candidate(snap, "newb64")
+        assert restored.photo_id == "p1"
+        assert restored.image_b64 == "newb64"
+        assert restored.technical_score == 35.0
+        assert restored.meaningful_score == 8
+        assert restored.capture_date == "2026-03-15"
+        assert restored.has_gps is True
+
+    def test_apply_vlm_checkpoint(self):
+        c = PhotoCandidate(photo_id="p1", image_b64="b64")
+        c.event_type = "other"
+        c.meaningful_score = 5
+
+        snap = {"scene_description": "beach", "event_type": "travel",
+                "event_score": 80.0, "meaningful_score": 9}
+        Pipeline._apply_vlm_checkpoint(c, snap)
+
+        assert c.scene_description == "beach"
+        assert c.event_type == "travel"
+        assert c.event_score == 80.0
+        assert c.meaningful_score == 9

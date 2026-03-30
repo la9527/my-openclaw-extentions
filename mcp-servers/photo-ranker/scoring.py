@@ -153,10 +153,12 @@ def rank_photos(
                 event_type=ps.get("event_type", "other"),
                 faces_detected=ps.get("faces_detected", 0),
                 known_persons=ps.get("known_persons", []),
+                meaningful_score=ps.get("meaningful_score", 5),
+                capture_date=ps.get("capture_date", ""),
             )
         )
 
-    ranked.sort(key=lambda r: r.total_score, reverse=True)
+    ranked.sort(key=lambda r: (r.total_score, r.meaningful_score), reverse=True)
 
     if top_n is not None:
         ranked = ranked[:top_n]

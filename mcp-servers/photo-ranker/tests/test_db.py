@@ -185,3 +185,66 @@ class TestFaceEmbeddingCache:
         loaded = db.load_face_embeddings("photo3")
         assert len(loaded) == 1
         assert loaded[0]["expression"] == "happy"
+
+
+class TestStageCheckpoints:
+    def test_save_and_load(self, db):
+        cand = {"photo_id": "p1", "technical_score": 30.0, "event_type": "travel"}
+        db.save_checkpoint("job1", "filter", "p1", cand)
+
+        loaded = db.load_checkpoints("job1", "filter")
+        assert "p1" in loaded
+        assert loaded["p1"]["technical_score"] == 30.0
+
+    def test_multiple_photos(self, db):
+        db.save_checkpoint("job1", "filter", "p1", {"photo_id": "p1"})
+        db.save_checkpoint("job1", "filter", "p2", {"photo_id": "p2"})
+
+        loaded = db.load_checkpoints("job1", "filter")
+        assert len(loaded) == 2
+
+    def test_separate_stages(self, db):
+        db.save_checkpoint("job1", "filter", "p1", {"stage": "filter"})
+        db.save_checkpoint("job1", "vlm", "p1", {"stage": "vlm"})
+
+        s1 = db.load_checkpoints("job1", "filter")
+        s2 = db.load_checkpoints("job1", "vlm")
+        assert s1["p1"]["stage"] == "filter"
+        assert s2["p1"]["stage"] == "vlm"
+
+    def test_clear_checkpoints(self, db):
+        db.save_checkpoint("job1", "filter", "p1", {"photo_id": "p1"})
+        db.save_checkpoint("job1", "vlm", "p1", {"photo_id": "p1"})
+        db.clear_checkpoints("job1")
+
+        assert db.load_checkpoints("job1", "filter") == {}
+        assert db.load_checkpoints("job1", "vlm") == {}
+
+    def test_upsert_checkpoint(self, db):
+        db.save_checkpoint("job1", "filter", "p1", {"score": 10})
+        db.save_checkpoint("job1", "filter", "p1", {"score": 20})
+
+        loaded = db.load_checkpoints("job1", "filter")
+        assert loaded["p1"]["score"] == 20
+
+    def test_photo_results_with_meaningful_score(self, db):
+        results = [
+            {
+                "photo_id": "p1",
+                "total_score": 85.0,
+                "quality_score": 70.0,
+                "family_score": 90.0,
+                "event_score": 80.0,
+                "uniqueness_score": 100.0,
+                "scene_description": "Birthday",
+                "event_type": "birthday",
+                "faces_detected": 2,
+                "known_persons": [],
+                "meaningful_score": 9,
+                "capture_date": "2026-03-15",
+            },
+        ]
+        db.save_photo_results("job1", results)
+        loaded = db.load_photo_results("job1")
+        assert loaded[0]["meaningful_score"] == 9
+        assert loaded[0]["capture_date"] == "2026-03-15"

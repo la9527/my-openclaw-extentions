@@ -55,6 +55,8 @@ class JobDB:
                 event_type TEXT,
                 faces_detected INTEGER DEFAULT 0,
                 known_persons_json TEXT DEFAULT '[]',
+                meaningful_score INTEGER DEFAULT 5,
+                capture_date TEXT DEFAULT '',
                 PRIMARY KEY (job_id, photo_id),
                 FOREIGN KEY (job_id) REFERENCES jobs(id)
             );
@@ -81,6 +83,19 @@ class JobDB:
                 expression TEXT DEFAULT 'unknown',
                 PRIMARY KEY (photo_id, face_idx)
             );
+
+            CREATE TABLE IF NOT EXISTS stage_checkpoints (
+                job_id TEXT NOT NULL,
+                photo_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                candidate_json TEXT NOT NULL,
+                completed_at REAL NOT NULL,
+                PRIMARY KEY (job_id, photo_id, stage),
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_stage_checkpoints_job
+                ON stage_checkpoints(job_id, stage);
             """
         )
         self._conn.commit()
@@ -143,8 +158,8 @@ class JobDB:
                     (job_id, photo_id, total_score, quality_score,
                      family_score, event_score, uniqueness_score,
                      scene_description, event_type, faces_detected,
-                     known_persons_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     known_persons_json, meaningful_score, capture_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -158,6 +173,8 @@ class JobDB:
                     r.get("event_type", ""),
                     r.get("faces_detected", 0),
                     json.dumps(r.get("known_persons", [])),
+                    r.get("meaningful_score", 5),
+                    r.get("capture_date", ""),
                 ),
             )
         self._conn.commit()
@@ -182,6 +199,8 @@ class JobDB:
                 "event_type": r["event_type"],
                 "faces_detected": r["faces_detected"],
                 "known_persons": json.loads(r["known_persons_json"]),
+                "meaningful_score": r["meaningful_score"] if "meaningful_score" in r.keys() else 5,
+                "capture_date": r["capture_date"] if "capture_date" in r.keys() else "",
             }
             for r in rows
         ]
@@ -190,6 +209,46 @@ class JobDB:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    # ── Stage Checkpoints ──
+
+    def save_checkpoint(
+        self, job_id: str, stage: str, photo_id: str, candidate_dict: dict,
+    ) -> None:
+        """Save a per-photo stage checkpoint for resume support."""
+        import time as _time
+
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO stage_checkpoints
+                (job_id, photo_id, stage, candidate_json, completed_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (job_id, photo_id, stage, json.dumps(candidate_dict), _time.time()),
+        )
+        self._conn.commit()
+
+    def load_checkpoints(
+        self, job_id: str, stage: str,
+    ) -> dict[str, dict]:
+        """Load all checkpointed candidates for a job stage.
+
+        Returns:
+            {photo_id: candidate_dict}
+        """
+        rows = self._conn.execute(
+            "SELECT photo_id, candidate_json FROM stage_checkpoints "
+            "WHERE job_id = ? AND stage = ?",
+            (job_id, stage),
+        ).fetchall()
+        return {r["photo_id"]: json.loads(r["candidate_json"]) for r in rows}
+
+    def clear_checkpoints(self, job_id: str) -> None:
+        """Remove all checkpoints for a completed/cancelled job."""
+        self._conn.execute(
+            "DELETE FROM stage_checkpoints WHERE job_id = ?", (job_id,),
+        )
+        self._conn.commit()
 
     # ── Known Faces ──
 

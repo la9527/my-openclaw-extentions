@@ -94,3 +94,30 @@ class TestRankedPhoto:
         assert d["total_score"] == 72.34  # round(72.345, 2) = 72.34 (banker's)
         assert d["family_score"] == 60.12
         assert d["known_persons"] == ["Alice"]
+
+    def test_meaningful_score_default(self):
+        r = RankedPhoto(
+            photo_id="p1", total_score=50, quality_score=50,
+            family_score=50, event_score=50, uniqueness_score=50,
+            scene_description="", event_type="other", faces_detected=0,
+        )
+        assert r.meaningful_score == 5
+        assert r.to_dict()["meaningful_score"] == 5
+
+    def test_capture_date_in_to_dict(self):
+        r = RankedPhoto(
+            photo_id="p1", total_score=50, quality_score=50,
+            family_score=50, event_score=50, uniqueness_score=50,
+            scene_description="", event_type="other", faces_detected=0,
+            capture_date="2026-03-15",
+        )
+        d = r.to_dict()
+        assert d["capture_date"] == "2026-03-15"
+
+    def test_capture_date_omitted_when_empty(self):
+        r = RankedPhoto(
+            photo_id="p1", total_score=50, quality_score=50,
+            family_score=50, event_score=50, uniqueness_score=50,
+            scene_description="", event_type="other", faces_detected=0,
+        )
+        assert "capture_date" not in r.to_dict()
