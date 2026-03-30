@@ -397,5 +397,134 @@ async def list_jobs(status: str = "") -> str:
     return json.dumps([j.to_dict() for j in jobs])
 
 
+# ── Album Management Tools ────────────────────────────
+
+from album_writer import AlbumWriter
+
+_album_writer: AlbumWriter | None = None
+
+
+def _get_album_writer() -> AlbumWriter:
+    global _album_writer
+    if _album_writer is None:
+        _album_writer = AlbumWriter()
+    return _album_writer
+
+
+@mcp.tool()
+async def create_album(name: str, folder: str = "") -> str:
+    """Apple Photos에 앨범을 생성합니다.
+
+    Args:
+        name: 앨범 이름
+        folder: 선택적 폴더 경로 (예: "AI 분류/2026-03")
+
+    Returns:
+        JSON with album name, uuid, created status.
+    """
+    writer = _get_album_writer()
+    result = writer.create_album(name, folder)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def add_to_album(
+    photo_uuids_json: str,
+    album_name: str,
+    folder: str = "",
+) -> str:
+    """기존 Photos 라이브러리 사진을 앨범에 추가합니다 (복제 없음).
+
+    Args:
+        photo_uuids_json: JSON array of photo UUID strings
+        album_name: 대상 앨범 이름 (없으면 자동 생성)
+        folder: 선택적 폴더 경로
+
+    Returns:
+        JSON with added count and errors.
+    """
+    writer = _get_album_writer()
+    uuids = json.loads(photo_uuids_json)
+    result = writer.add_photos_to_album(uuids, album_name, folder)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def organize_results(
+    job_id: str,
+    album_prefix: str = "AI 분류",
+    folder: str = "",
+    min_score: float = 0.0,
+) -> str:
+    """분류 완료된 Job 결과를 이벤트 유형별 앨범으로 자동 정리합니다.
+
+    Args:
+        job_id: 완료된 분류 Job ID
+        album_prefix: 앨범 이름 접두사 (예: "AI 분류")
+        folder: 선택적 폴더 경로
+        min_score: 최소 점수 (이하 건너뜀)
+
+    Returns:
+        JSON with albums_created, photos_organized, skipped.
+    """
+    db = _get_job_db()
+    results = db.load_photo_results(job_id)
+    if not results:
+        return json.dumps({"error": f"No results for job {job_id}"})
+
+    writer = _get_album_writer()
+    result = writer.organize_by_classification(results, album_prefix, folder, min_score)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def import_photos(
+    photo_paths_json: str,
+    album_name: str = "",
+    folder: str = "",
+    skip_duplicates: bool = True,
+) -> str:
+    """외부 사진을 Apple Photos 라이브러리에 가져옵니다.
+
+    Args:
+        photo_paths_json: JSON array of file path strings
+        album_name: 선택적 대상 앨범 (없으면 앨범 미지정)
+        folder: 선택적 폴더 경로
+        skip_duplicates: 중복 검사 여부
+
+    Returns:
+        JSON with imported count and errors.
+    """
+    writer = _get_album_writer()
+    paths = json.loads(photo_paths_json)
+    result = writer.import_photos(paths, album_name, folder, skip_duplicates)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def import_and_organize(
+    photo_paths_json: str,
+    results_json: str,
+    album_prefix: str = "AI 분류",
+    folder: str = "",
+) -> str:
+    """외부 사진을 가져오면서 분류 결과에 따라 앨범별로 정리합니다.
+
+    Args:
+        photo_paths_json: JSON array of file path strings
+        results_json: JSON array of classification results (같은 순서)
+        album_prefix: 앨범 이름 접두사
+        folder: 선택적 폴더 경로
+
+    Returns:
+        JSON with imported count and albums_created.
+    """
+    writer = _get_album_writer()
+    paths = json.loads(photo_paths_json)
+    results = json.loads(results_json)
+    result = writer.import_and_classify(paths, results, album_prefix, folder)
+    return json.dumps(result)
+
+
 if __name__ == "__main__":
     mcp.run()
