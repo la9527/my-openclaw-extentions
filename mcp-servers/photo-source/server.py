@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     "photo-source",
     instructions=(
-        "사진 소스 접근 서버. Apple Photos, Google Cloud Storage, "
-        "로컬 폴더에서 사진을 검색, 메타데이터 조회, 썸네일 생성할 수 있습니다."
+        "사진 소스 접근 서버. Apple Photos, Google Photos(Google One), "
+        "Google Cloud Storage, 로컬 폴더에서 사진을 검색, 메타데이터 조회, "
+        "썸네일 생성할 수 있습니다."
     ),
 )
 
@@ -20,6 +21,7 @@ mcp = FastMCP(
 _local_source = None
 _apple_source = None
 _gcs_source = None
+_google_photos_source = None
 
 
 def _get_local_source(root_dir: str):
@@ -49,6 +51,15 @@ def _get_gcs_source(bucket: str, prefix: str = ""):
     return _gcs_source
 
 
+def _get_google_photos_source(credentials_path: str = ""):
+    from sources.google_photos import GooglePhotosSource
+
+    global _google_photos_source
+    if _google_photos_source is None:
+        _google_photos_source = GooglePhotosSource(credentials_path)
+    return _google_photos_source
+
+
 # ── MCP Tools ──────────────────────────────────────────
 
 
@@ -65,7 +76,7 @@ def list_photos(
     """사진 목록을 반환합니다.
 
     Args:
-        source: 소스 종류 — "local", "apple", "gcs"
+        source: 소스 종류 — "local", "apple", "google", "gcs"
         path_or_bucket: local이면 디렉터리 경로, gcs이면 bucket 이름
         date_from: 시작 날짜 (ISO 형식, 선택)
         date_to: 종료 날짜 (ISO 형식, 선택)
@@ -80,10 +91,10 @@ def list_photos(
         "limit": limit,
     }
 
-    if source == "apple":
+    if source in ("apple", "google"):
         if album:
             kwargs["album"] = album
-        if person:
+        if person and source == "apple":
             kwargs["person"] = person
 
     photos = src.list_photos(**kwargs)
@@ -99,7 +110,7 @@ def get_metadata(
     """사진의 상세 메타데이터를 반환합니다.
 
     Args:
-        source: 소스 종류 — "local", "apple", "gcs"
+        source: 소스 종류 — "local", "apple", "google", "gcs"
         photo_id: 사진 ID (local=경로, apple=UUID, gcs=blob 이름)
         path_or_bucket: local이면 디렉터리, gcs이면 bucket 이름
     """
@@ -118,7 +129,7 @@ def get_thumbnail(
     """사진의 리사이즈된 썸네일을 base64로 반환합니다.
 
     Args:
-        source: 소스 종류 — "local", "apple", "gcs"
+        source: 소스 종류 — "local", "apple", "google", "gcs"
         photo_id: 사진 ID
         path_or_bucket: local이면 디렉터리, gcs이면 bucket 이름
         max_size: 썸네일 최대 크기 (픽셀)
@@ -134,20 +145,24 @@ def search_photos(
     path_or_bucket: str = "",
     limit: int = 50,
 ) -> list[dict]:
-    """키워드로 사진을 검색합니다. (Apple Photos 전용)
+    """키워드로 사진을 검색합니다. (Apple Photos, Google Photos 지원)
 
     Args:
         query: 검색 키워드
-        source: 소스 종류 (현재 "apple"만 검색 지원)
+        source: 소스 종류 — "apple" 또는 "google"
         path_or_bucket: 사용하지 않음
         limit: 최대 결과 수
     """
-    if source != "apple":
-        return [{"error": "search_photos는 현재 Apple Photos만 지원합니다."}]
-
-    src = _get_apple_source()
-    photos = src.search_photos(query, limit)
-    return [p.to_dict() for p in photos]
+    if source == "google":
+        src = _get_google_photos_source()
+        photos = src.search_photos(query, limit)
+        return [p.to_dict() for p in photos]
+    elif source == "apple":
+        src = _get_apple_source()
+        photos = src.search_photos(query, limit)
+        return [p.to_dict() for p in photos]
+    else:
+        return [{"error": f"search_photos는 apple, google만 지원합니다. (받은 값: {source})"}]
 
 
 @mcp.tool()
@@ -161,7 +176,7 @@ def export_photos(
     """사진을 지정 디렉터리에 내보냅니다.
 
     Args:
-        source: 소스 종류 — "local", "apple", "gcs"
+        source: 소스 종류 — "local", "apple", "google", "gcs"
         photo_ids: 내보낼 사진 ID 목록
         output_dir: 출력 디렉터리
         path_or_bucket: local이면 디렉터리, gcs이면 bucket 이름
@@ -233,5 +248,7 @@ def _resolve_source(source: str, path_or_bucket: str):
         if not path_or_bucket:
             raise ValueError("path_or_bucket is required for gcs source")
         return _get_gcs_source(path_or_bucket)
+    elif source == "google":
+        return _get_google_photos_source()
     else:
-        raise ValueError(f"Unknown source: {source}. Use 'local', 'apple', or 'gcs'.")
+        raise ValueError(f"Unknown source: {source}. Use 'local', 'apple', 'google', or 'gcs'.")

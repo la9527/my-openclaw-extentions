@@ -2,12 +2,46 @@
 
 import base64
 import io
+from unittest.mock import patch, MagicMock
 
 import pytest
 from PIL import Image
 
 from jobs import Job, JobStatus
+from models import EventType, SceneDescription
 from pipeline import PhotoCandidate, Pipeline, PipelineConfig
+
+
+def _mock_scene(*_args, **_kwargs):
+    """Return a minimal SceneDescription without loading VLM."""
+    return SceneDescription(
+        scene="test scene",
+        people_count=0,
+        is_family_photo=False,
+        expressions=[],
+        event_type=EventType.DAILY,
+        event_confidence=0.5,
+        quality_notes="",
+        meaningful_score=3,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_heavy_engines(monkeypatch):
+    """Mock VLM and Aesthetic engines so tests don't load real models."""
+    mock_vlm = MagicMock()
+    mock_vlm.describe_scene.side_effect = _mock_scene
+
+    mock_ae = MagicMock()
+    mock_ae.score.return_value = 5.0
+
+    async def _mock_stage2(self, cand):
+        """Replacement _stage2 that doesn't load VLM or aesthetic."""
+        cand.scene_description = "test scene"
+        cand.event_type = EventType.DAILY.value
+        cand.event_score = 30.0
+
+    monkeypatch.setattr(Pipeline, "_stage2", _mock_stage2)
 
 
 @pytest.fixture

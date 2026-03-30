@@ -5,12 +5,14 @@ VLM(Vision Language Model), CLIP 기반 미적 평가, 얼굴 인식, 중복 감
 
 ## 주요 기능
 
-- **품질 점수 산정** — 해상도, 노출, 선명도 등 기술적 품질 분석
+- **품질 점수 산정** — 5-component 기술적 품질 분석 (blur, exposure, noise, resolution, color diversity)
 - **VLM 기반 장면 묘사** — Qwen2.5-VL 모델을 사용한 자연어 장면 설명
 - **이벤트 자동 분류** — 여행, 가족 모임, 음식, 풍경 등 이벤트 타입 자동 분류
-- **얼굴 인식** — 사진 속 얼굴 수 및 위치 감지
+- **얼굴 인식** — insightface / mediapipe / face-recognition 3-tier 백엔드, 소형 이미지 upscale retry
 - **중복 감지** — perceptual hash 기반 유사 사진 그룹핑
+- **LAION Aesthetic** — sigmoid 매핑으로 3-7 구간 변별력 확대
 - **베스트 샷 랭킹** — 다차원 점수를 종합하여 최고의 사진 선별
+- **Apple Photos 연동** — osxphotos 읽기 + photoscript 앨범 쓰기
 - **백그라운드 Job 시스템** — 대량 분류 작업을 비동기 Job으로 관리
 - **SQLite 영속성** — Job 상태와 분류 결과를 DB에 저장
 - **배치 CLI** — 커맨드라인에서 직접 분류 작업 실행
@@ -46,7 +48,7 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | 기본 | `mcp>=1.0.0`, `pillow>=10.0`, `numpy>=1.26`, `pydantic>=2.0`, `imagehash>=4.3` | 핵심 서버, 이미지 처리, 해시 |
 | `vlm` | `mlx-vlm>=0.1` | VLM 장면 묘사 (Apple Silicon) |
 | `aesthetic` | `open-clip-torch>=2.24`, `torch>=2.0` | CLIP 미적 품질 평가 |
-| `face` | `face-recognition>=1.3` | 얼굴 감지 |
+| face          | `insightface>=0.7`, `mediapipe>=0.10`, `face-recognition>=1.3` | 얼굴 감지 (3-tier) |
 
 ## MCP 도구 목록
 
@@ -77,8 +79,8 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 
 | 항목 | 가중치 | 설명 |
 |---|---|---|
-| 품질 (quality) | 0.25 | 해상도, 노출, 선명도 등 기술적 품질 |
-| 가족 (family) | 0.30 | 얼굴 수, 인물 관련 점수 |
+| 품질 (quality) | 0.30 | blur, exposure, noise, resolution, color + sigmoid aesthetic |
+| 가족 (family) | 0.25 | 얼굴 수, 알려진 인물, 표정 |
 | 이벤트 (event) | 0.25 | 이벤트 분류 신뢰도 |
 | 고유성 (uniqueness) | 0.20 | 중복이 적을수록 높은 점수 |
 
@@ -109,20 +111,22 @@ uv run batch_classify.py \
 
 ```
 photo-ranker/
-├── server.py           # MCP 서버 엔트리포인트 (11개 도구)
+├── server.py           # MCP 서버 엔트리포인트 (17개 도구)
 ├── engines/
 │   ├── vlm.py          # Qwen2.5-VL 장면 묘사 엔진
-│   ├── aesthetic.py    # CLIP + 기술적 품질 엔진
-│   ├── face.py         # 얼굴 인식 엔진
-│   └── dedup.py        # perceptual hash 중복 감지 엔진
+│   ├── aesthetic.py    # CLIP + LAION + 5-component 기술 품질 엔진
+│   ├── face.py         # 3-tier 얼굴 인식 (insightface/mediapipe/face-recognition)
+│   ├── dedup.py        # perceptual hash 중복 감지 엔진
+│   └── exif.py         # EXIF 메타데이터 + GPS + 방향 보정
 ├── models.py           # 데이터 모델 (EventType, QualityScore, …)
 ├── scoring.py          # 가중 점수 산정 로직
 ├── jobs.py             # 비동기 Job 큐
 ├── pipeline.py         # 2단계 분류 파이프라인
+├── album_writer.py     # Apple Photos 앨범 쓰기 (photoscript)
 ├── db.py               # SQLite 영속성 (WAL 모드)
 ├── batch_classify.py   # 배치 CLI
 ├── pyproject.toml
-└── tests/              # 87개 테스트
+└── tests/              # 160개 테스트
 ```
 
 ## 테스트

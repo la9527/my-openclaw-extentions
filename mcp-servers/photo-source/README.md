@@ -1,15 +1,15 @@
 # photo-source MCP Server
 
-다양한 사진 소스(Apple Photos, Google Cloud Storage, 로컬 폴더)에 통합 접근할 수 있는 MCP(Model Context Protocol) 서버입니다.
+다양한 사진 소스(Apple Photos, Google Photos/Google One, Google Cloud Storage, 로컬 폴더)에 통합 접근할 수 있는 MCP(Model Context Protocol) 서버입니다.
 사진 목록 조회, 메타데이터 검색, 썸네일 생성, 키워드 검색, 내보내기 기능을 제공합니다.
 
 ## 주요 기능
 
-- **통합 소스 접근** — Apple Photos, GCS, 로컬 폴더를 동일 인터페이스로 접근
+- **통합 소스 접근** — Apple Photos, Google Photos(Google One), GCS, 로컬 폴더를 동일 인터페이스로 접근
 - **사진 목록 조회** — 날짜, 앨범, 인물 필터링 지원
 - **메타데이터 조회** — EXIF, 카메라 정보, GPS, 앨범, 인물, 키워드
 - **썸네일 생성** — 지정 크기로 리사이즈된 base64 썸네일
-- **키워드 검색** — Apple Photos 라이브러리 전체 텍스트 검색
+- **키워드 검색** — Apple Photos / Google Photos 검색
 - **사진 내보내기** — 원본 또는 리사이즈하여 지정 디렉터리에 내보내기
 
 ## 지원 소스
@@ -18,6 +18,7 @@
 |---|---|---|---|
 | 로컬 폴더 | `local` | 파일 시스템의 이미지 파일 접근 | (기본 포함) |
 | Apple Photos | `apple` | macOS Apple Photos 라이브러리 접근 | `osxphotos>=0.68` |
+| Google Photos | `google` | Google Photos (Google One) 접근 | `google-api-python-client`, `google-auth-oauthlib` |
 | Google Cloud Storage | `gcs` | GCS 버킷의 이미지 접근 | `google-cloud-storage>=2.14` |
 
 ## 요구 사항
@@ -26,6 +27,7 @@
 - [uv](https://docs.astral.sh/uv/) (권장 패키지 매니저)
 - Apple Photos 소스: macOS 필수
 - GCS 소스: Google Cloud 인증 설정 필요 (`GOOGLE_APPLICATION_CREDENTIALS` 등)
+- Google Photos 소스: OAuth 2.0 Client ID 필요 (Google Cloud Console)
 
 ## 설치
 
@@ -41,6 +43,7 @@ uv sync --all-extras
 # 또는 필요한 소스만 선택 설치
 uv sync --extra apple    # Apple Photos 접근 (osxphotos)
 uv sync --extra gcs      # Google Cloud Storage 접근
+uv sync --extra google   # Google Photos (Google One) 접근
 ```
 
 ## 의존성 구성
@@ -50,6 +53,7 @@ uv sync --extra gcs      # Google Cloud Storage 접근
 | 기본 | `mcp>=1.0.0`, `pillow>=10.0`, `pydantic>=2.0` | 핵심 서버, 이미지 처리, 데이터 모델 |
 | `apple` | `osxphotos>=0.68` | Apple Photos 라이브러리 접근 |
 | `gcs` | `google-cloud-storage>=2.14` | GCS 버킷 접근 |
+| `google` | `google-api-python-client>=2.100`, `google-auth-oauthlib>=1.2` | Google Photos 접근 |
 
 ## MCP 도구 목록
 

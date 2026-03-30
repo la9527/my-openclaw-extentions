@@ -1,0 +1,37 @@
+{
+  "id": "photos-classify",
+  "description": "사진 분류, 랭킹, 앨범 정리를 위한 MCP 기반 도구. photo-ranker와 photo-source MCP 서버를 OpenClaw에서 사용합니다.",
+  "mcpServers": {
+    "photo-ranker": {
+      "command": "uv",
+      "args": ["run", "--directory", "${PHOTO_RANKER_DIR:-./mcp-servers/photo-ranker}", "server.py"],
+      "description": "사진 품질 분석, VLM 장면 묘사, 이벤트 분류, 얼굴 인식, 중복 감지, 랭킹"
+    },
+    "photo-source": {
+      "command": "uv",
+      "args": ["run", "--directory", "${PHOTO_SOURCE_DIR:-./mcp-servers/photo-source}", "server.py"],
+      "description": "Apple Photos, Google Photos, GCS, 로컬 폴더 사진 소스 접근"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "photoRankerDir": {
+        "type": "string",
+        "description": "photo-ranker MCP 서버 디렉터리 경로",
+        "default": "./mcp-servers/photo-ranker"
+      },
+      "photoSourceDir": {
+        "type": "string",
+        "description": "photo-source MCP 서버 디렉터리 경로",
+        "default": "./mcp-servers/photo-source"
+      },
+      "defaultSource": {
+        "type": "string",
+        "enum": ["local", "apple", "google", "gcs"],
+        "description": "기본 사진 소스",
+        "default": "apple"
+      }
+    }
+  }
+}

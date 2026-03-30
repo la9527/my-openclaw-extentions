@@ -1,0 +1,16 @@
+{
+  "name": "@myopenclaw/photos-classify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw photos classify plugin – MCP 기반 사진 분류/랭킹 도구",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "openclaw": "*",
+    "vitest": "^4.1.1"
+  }
+}
