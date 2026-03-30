@@ -11,6 +11,13 @@ import io
 import logging
 from pathlib import Path
 
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except ImportError:
+    pass  # HEIC support unavailable
+
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
@@ -176,6 +183,8 @@ def _load_apple(
 def _image_to_b64(img, max_size: int = 512) -> str:
     """Resize and encode a PIL Image as base64 JPEG."""
     img.thumbnail((max_size, max_size))
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()
