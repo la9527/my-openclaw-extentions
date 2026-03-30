@@ -29,7 +29,7 @@ class DedupEngine:
         return str(h)
 
     def compute_phash(self, image_b64: str) -> str:
-        """Compute perceptual hash (DCT-based)."""
+        """Compute perceptual hash (DCT-based). More resistant to false positives."""
         import imagehash
         from PIL import Image
 
@@ -37,6 +37,15 @@ class DedupEngine:
         image = Image.open(io.BytesIO(img_bytes))
         h = imagehash.phash(image)
         return str(h)
+
+    def compute_default_hash(self, image_b64: str) -> str:
+        """Compute the default hash used for dedup (phash).
+
+        phash was chosen over ahash based on benchmark results:
+        - phash_t8: 100% recall, 0 false positive pairs
+        - ahash_t8: 100% recall, 54 false positive pairs
+        """
+        return self.compute_phash(image_b64)
 
     def hash_distance(self, hash1: str, hash2: str) -> int:
         """Compute Hamming distance between two hex hash strings."""

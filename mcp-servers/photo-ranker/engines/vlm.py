@@ -22,14 +22,16 @@ event_type 판단 기준 (우선순위 순서대로 확인):
 1. birthday: 케이크에 촛불이 있거나 "Happy Birthday" 장식이 보임
 2. graduation: 학사모, 졸업 가운, 졸업장이 보임
 3. celebration: 풍선·배너·화환 등 파티 장식, 또는 샴페인/와인잔 건배. 단순히 사람이 모인 것만으로는 celebration이 아님
-4. travel: 유명 관광지·랜드마크 앞에서 촬영, 또는 공항·여행가방이 보임
+4. travel: 유명 관광지·랜드마크·역사적 건축물 앞에서 촬영, 또는 공항·비행기·여행가방·호텔로비·관광안내판·외국어간판이 보임. 자연 풍경이라도 관광지 특징(전망대, 케이블카, 관광객)이 있으면 travel
 5. meal: 음식·음료·디저트·케이크(촛불 없는)가 사진의 주요 피사체. 사람이 함께 있어도 음식이 주 피사체면 meal
-6. portrait: 1~2인 인물이 화면의 주제, 인물 비중이 배경보다 큼
-7. outdoor: 자연 풍경(산, 바다, 공원, 해변)이 주제이고 이벤트/관광 단서 없음
-8. daily: 일상 공간(사무실, 카페, 집), 특별한 이벤트 없는 평범한 장면
-9. other: 위 어느 것에도 해당하지 않음
+6. portrait: 인물이 화면 면적의 50% 이상을 차지하고 인물 자체가 주제. 배경이 일상 공간이라도 인물이 주요 피사체이면 portrait
+7. outdoor: 자연 풍경(산, 바다, 공원, 해변)이 주제이고 관광/이벤트 단서가 전혀 없음
+8. daily: 일상 공간(사무실, 카페, 집)이 주 배경이며 인물 비중이 작거나 없음, 특별한 이벤트 없는 평범한 장면
 
-주의: 음식이 화면 중심에 있으면 meal을 우선 고려. 사람들이 모여 있어도 파티 장식이 없으면 celebration이 아님.
+주의:
+- 음식이 화면 중심에 있으면 meal을 우선 고려
+- 사람들이 모여 있어도 파티 장식이 없으면 celebration이 아님
+- 확신이 없을 때: 위 8가지 중 가장 유사한 유형을 선택하고 event_confidence를 0.3-0.5로 낮추세요. "other"는 위 8가지 어디에도 전혀 해당하지 않을 때만 사용
 
 event_confidence: 핵심 단서 2개 이상=0.9, 1개=0.7, 약함=0.5, 소거법=0.3
 
@@ -153,14 +155,27 @@ def parse_scene_output(raw_output: str) -> SceneDescription:
     except ValueError:
         event_type = EventType.OTHER
 
+    # Safely parse numeric fields (VLM may return non-numeric text)
+    def safe_int(val, default: int = 0) -> int:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+
+    def safe_float(val, default: float = 0.0) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
     return SceneDescription(
         scene=str(data.get("scene", "")),
-        people_count=int(data.get("people_count", 0)),
+        people_count=safe_int(data.get("people_count", 0)),
         is_family_photo=bool(data.get("is_family_photo", False)),
         expressions=list(data.get("expressions", [])),
         event_type=event_type,
-        event_confidence=float(data.get("event_confidence", 0.0)),
+        event_confidence=safe_float(data.get("event_confidence", 0.0)),
         quality_notes=str(data.get("quality_notes", "")),
-        meaningful_score=int(data.get("meaningful_score", 5)),
+        meaningful_score=safe_int(data.get("meaningful_score", 5), default=5),
         raw_json=data,
     )

@@ -1,4 +1,4 @@
-"""Face detection engine with mediapipe (primary) and face-recognition (fallback)."""
+"""Face detection engine with insightface (primary), mediapipe, and face-recognition (fallback)."""
 
 from __future__ import annotations
 
@@ -30,17 +30,34 @@ def _mediapipe_model_path() -> Path:
 
 
 class FaceEngine:
-    """Detects faces using mediapipe (preferred) or face-recognition."""
+    """Detects faces using insightface (preferred), mediapipe, or face-recognition."""
 
     def __init__(self) -> None:
-        self._backend: str | None = None  # "mediapipe" | "face_recognition" | ""
+        self._backend: str | None = None  # "insightface" | "mediapipe" | "face_recognition" | ""
         self._mp_detector = None
+        self._insight_app = None
 
     def _check_available(self) -> None:
         if self._backend is not None:
             return
 
-        # Try mediapipe first (no dlib dependency)
+        # Try insightface first (ONNX-based, provides 512-dim ArcFace embeddings)
+        try:
+            from insightface.app import FaceAnalysis
+
+            app = FaceAnalysis(
+                name="buffalo_l",
+                providers=["CPUExecutionProvider"],
+            )
+            app.prepare(ctx_id=-1, det_size=(640, 640))
+            self._insight_app = app
+            self._backend = "insightface"
+            logger.info("Face detection backend: insightface (ArcFace 512-dim)")
+            return
+        except (ImportError, Exception) as exc:
+            logger.debug("insightface not available: %s", exc)
+
+        # Try mediapipe (no embeddings, detection only)
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions, vision
@@ -74,7 +91,7 @@ class FaceEngine:
         self._backend = ""  # empty string = nothing available
         logger.warning(
             "No face detection backend available. "
-            "Install mediapipe or face-recognition."
+            "Install insightface, mediapipe, or face-recognition."
         )
 
     @property
@@ -88,9 +105,55 @@ class FaceEngine:
         if not self._backend:
             return []
 
+        if self._backend == "insightface":
+            return self._detect_insightface(image_b64)
         if self._backend == "mediapipe":
             return self._detect_mediapipe(image_b64)
         return self._detect_face_recognition(image_b64)
+
+    def _detect_insightface(self, image_b64: str) -> list[FaceResult]:
+        """Detect faces via insightface (RetinaFace detection + ArcFace embeddings)."""
+        from PIL import Image
+
+        try:
+            img_bytes = base64.b64decode(image_b64)
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        except Exception:
+            logger.warning("Failed to decode image for face detection")
+            return []
+
+        img_array = np.array(image)
+        faces = self._insight_app.get(img_array)
+
+        results: list[FaceResult] = []
+        for face in faces:
+            bbox = face.bbox.astype(int)  # [x1, y1, x2, y2]
+            # Convert to (top, right, bottom, left) format
+            top = int(bbox[1])
+            right = int(bbox[2])
+            bottom = int(bbox[3])
+            left = int(bbox[0])
+
+            embedding = face.embedding.tolist() if face.embedding is not None else None
+
+            # Gender/age from insightface genderage model
+            gender = ""
+            age = 0
+            if hasattr(face, "gender") and face.gender is not None:
+                gender = "male" if face.gender == 1 else "female"
+            if hasattr(face, "age") and face.age is not None:
+                age = int(face.age)
+
+            results.append(
+                FaceResult(
+                    bbox=(top, right, bottom, left),
+                    embedding=embedding,
+                    expression="unknown",
+                    gender=gender,
+                    age=age,
+                )
+            )
+        return results
 
     def _detect_mediapipe(self, image_b64: str) -> list[FaceResult]:
         """Detect faces via mediapipe FaceDetector (Tasks API)."""
@@ -159,14 +222,43 @@ class FaceEngine:
         face_embedding: list[float],
         tolerance: float = 0.6,
     ) -> list[bool]:
-        """Compare a face embedding against known faces."""
+        """Compare a face embedding against known faces.
+
+        For insightface ArcFace embeddings, uses cosine similarity.
+        For face-recognition, uses Euclidean distance.
+        """
         if not self.is_available:
             return []
         if self._backend == "mediapipe":
             # mediapipe FaceDetection doesn't produce embeddings
             return []
+
+        if self._backend == "insightface":
+            return self._compare_insightface(known_embeddings, face_embedding, tolerance)
+
         import face_recognition
 
         known = [np.array(e) for e in known_embeddings]
         unknown = np.array(face_embedding)
         return face_recognition.compare_faces(known, unknown, tolerance=tolerance)
+
+    def _compare_insightface(
+        self,
+        known_embeddings: list[list[float]],
+        face_embedding: list[float],
+        tolerance: float = 0.6,
+    ) -> list[bool]:
+        """Compare using cosine similarity (insightface ArcFace embeddings)."""
+        unknown = np.array(face_embedding)
+        unknown_norm = unknown / (np.linalg.norm(unknown) + 1e-8)
+
+        results = []
+        for known in known_embeddings:
+            k = np.array(known)
+            k_norm = k / (np.linalg.norm(k) + 1e-8)
+            similarity = float(np.dot(k_norm, unknown_norm))
+            # ArcFace cosine similarity: >0.4 is same person typically
+            # Map tolerance: face_recognition uses 0.6 Euclidean, we use 0.4 cosine
+            cosine_threshold = 1.0 - tolerance  # 0.6 tolerance -> 0.4 threshold
+            results.append(similarity >= cosine_threshold)
+        return results

@@ -63,6 +63,24 @@ class JobDB:
                 ON photo_results(job_id);
             CREATE INDEX IF NOT EXISTS idx_jobs_status
                 ON jobs(status);
+
+            CREATE TABLE IF NOT EXISTS known_faces (
+                name TEXT NOT NULL,
+                face_idx INTEGER NOT NULL DEFAULT 0,
+                embedding BLOB NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (name, face_idx)
+            );
+
+            CREATE TABLE IF NOT EXISTS face_embeddings (
+                photo_id TEXT NOT NULL,
+                face_idx INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                gender TEXT DEFAULT '',
+                age INTEGER DEFAULT 0,
+                expression TEXT DEFAULT 'unknown',
+                PRIMARY KEY (photo_id, face_idx)
+            );
             """
         )
         self._conn.commit()
@@ -172,6 +190,110 @@ class JobDB:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    # ── Known Faces ──
+
+    def save_known_face(self, name: str, embedding: list[float]) -> int:
+        """Register a known person's face embedding. Returns face_idx."""
+        import struct
+        import time
+
+        blob = struct.pack(f"{len(embedding)}f", *embedding)
+
+        # Find next face_idx for this name
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(face_idx), -1) + 1 FROM known_faces WHERE name = ?",
+            (name,),
+        ).fetchone()
+        face_idx = row[0]
+
+        self._conn.execute(
+            "INSERT OR REPLACE INTO known_faces (name, face_idx, embedding, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (name, face_idx, blob, time.time()),
+        )
+        self._conn.commit()
+        return face_idx
+
+    def load_known_faces(self) -> dict[str, list[list[float]]]:
+        """Load all known faces as {name: [embedding, ...]}."""
+        import struct
+
+        rows = self._conn.execute(
+            "SELECT name, embedding FROM known_faces ORDER BY name, face_idx"
+        ).fetchall()
+
+        result: dict[str, list[list[float]]] = {}
+        for row in rows:
+            name = row["name"]
+            blob = row["embedding"]
+            n_floats = len(blob) // 4
+            embedding = list(struct.unpack(f"{n_floats}f", blob))
+            if name not in result:
+                result[name] = []
+            result[name].append(embedding)
+        return result
+
+    def delete_known_face(self, name: str) -> int:
+        """Delete all embeddings for a known person. Returns deleted count."""
+        cursor = self._conn.execute(
+            "DELETE FROM known_faces WHERE name = ?", (name,)
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
+    def list_known_faces(self) -> list[dict]:
+        """List registered known faces with count per person."""
+        rows = self._conn.execute(
+            "SELECT name, COUNT(*) as count FROM known_faces GROUP BY name ORDER BY name"
+        ).fetchall()
+        return [{"name": r["name"], "embedding_count": r["count"]} for r in rows]
+
+    # ── Face Embedding Cache ──
+
+    def save_face_embedding(
+        self,
+        photo_id: str,
+        face_idx: int,
+        embedding: list[float],
+        gender: str = "",
+        age: int = 0,
+        expression: str = "unknown",
+    ) -> None:
+        """Cache a face embedding for a photo."""
+        import struct
+
+        blob = struct.pack(f"{len(embedding)}f", *embedding)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO face_embeddings "
+            "(photo_id, face_idx, embedding, gender, age, expression) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (photo_id, face_idx, blob, gender, age, expression),
+        )
+        self._conn.commit()
+
+    def load_face_embeddings(self, photo_id: str) -> list[dict]:
+        """Load cached face embeddings for a photo."""
+        import struct
+
+        rows = self._conn.execute(
+            "SELECT * FROM face_embeddings WHERE photo_id = ? ORDER BY face_idx",
+            (photo_id,),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            blob = row["embedding"]
+            n_floats = len(blob) // 4
+            embedding = list(struct.unpack(f"{n_floats}f", blob))
+            results.append({
+                "face_idx": row["face_idx"],
+                "embedding": embedding,
+                "gender": row["gender"],
+                "age": row["age"],
+                "expression": row["expression"],
+            })
+        return results
 
     @staticmethod
     def _row_to_job(row) -> Job:

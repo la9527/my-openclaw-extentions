@@ -44,6 +44,10 @@ class TestPipelineConfig:
         assert c.dedup_threshold == 8
         assert c.vlm_top_n == 0
 
+    def test_vlm_model_path(self):
+        c = PipelineConfig(vlm_model_path="custom/model")
+        assert c.vlm_model_path == "custom/model"
+
 
 class TestPhotoCandidate:
     def test_default_fields(self):
@@ -51,6 +55,9 @@ class TestPhotoCandidate:
         assert c.technical_score == 0.0
         assert c.passed_stage1 is True
         assert c.event_type == "other"
+        assert c.has_gps is False
+        assert c.faces == []
+        assert c.known_persons == []
 
 
 class TestPipeline:
@@ -109,3 +116,68 @@ class TestPipeline:
         pipe = Pipeline()
         ranked = await pipe.run([])
         assert ranked == []
+
+
+class TestKnownPersonMatching:
+    def test_register_known_face(self):
+        pipe = Pipeline()
+        pipe.register_known_face("Alice", [0.5] * 512)
+        assert "Alice" in pipe._known_faces
+        assert len(pipe._known_faces["Alice"]) == 1
+
+    def test_register_multiple_embeddings(self):
+        pipe = Pipeline()
+        pipe.register_known_face("Bob", [0.1] * 512)
+        pipe.register_known_face("Bob", [0.2] * 512)
+        assert len(pipe._known_faces["Bob"]) == 2
+
+    def test_identify_matching(self):
+        import numpy as np
+
+        pipe = Pipeline()
+        # Register known face
+        known_emb = list(np.random.randn(512))
+        pipe.register_known_face("Alice", known_emb)
+
+        # Similar embedding (same person)
+        noise = np.random.randn(512) * 0.05
+        similar = [k + n for k, n in zip(known_emb, noise)]
+        result = pipe._identify_known_persons([similar])
+        assert "Alice" in result
+
+    def test_identify_no_match(self):
+        import numpy as np
+
+        pipe = Pipeline()
+        pipe.register_known_face("Alice", list(np.random.randn(512)))
+
+        # Completely different embedding
+        different = list(np.random.randn(512))
+        result = pipe._identify_known_persons([different])
+        assert result == []
+
+    def test_identify_empty(self):
+        pipe = Pipeline()
+        result = pipe._identify_known_persons([])
+        assert result == []
+
+    def test_identify_no_known_faces(self):
+        pipe = Pipeline()
+        result = pipe._identify_known_persons([[0.1] * 512])
+        assert result == []
+
+
+class TestExifIntegration:
+    @pytest.mark.asyncio
+    async def test_stage1_extracts_exif(self, sample_photos):
+        pipe = Pipeline()
+        cand = await pipe._stage1("test", sample_photos[0]["image_b64"])
+        # JPEG test image has no GPS
+        assert cand.has_gps is False
+
+    @pytest.mark.asyncio
+    async def test_has_gps_in_ranked(self, sample_photos):
+        pipe = Pipeline()
+        ranked = await pipe.run(sample_photos)
+        for r in ranked:
+            assert hasattr(r, "has_gps")

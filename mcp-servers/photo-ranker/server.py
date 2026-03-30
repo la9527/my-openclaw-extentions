@@ -149,6 +149,43 @@ async def find_duplicates(
 
 
 @mcp.tool()
+async def register_face(image_b64: str, name: str) -> str:
+    """Register a known person's face for family photo scoring.
+
+    Args:
+        image_b64: Base64-encoded image containing the person's face.
+        name: Name of the person.
+
+    Returns:
+        JSON with registration result.
+    """
+    faces = get_face().detect_faces(image_b64)
+    if not faces:
+        return json.dumps({"error": "No face detected in image"})
+    if not faces[0].embedding:
+        return json.dumps({"error": "Face detected but no embedding available"})
+
+    db = _get_job_db()
+    face_idx = db.save_known_face(name, faces[0].embedding)
+    return json.dumps({
+        "name": name,
+        "face_idx": face_idx,
+        "embedding_dim": len(faces[0].embedding),
+    })
+
+
+@mcp.tool()
+async def list_known_faces() -> str:
+    """List all registered known faces.
+
+    Returns:
+        JSON array of registered people and their embedding counts.
+    """
+    db = _get_job_db()
+    return json.dumps(db.list_known_faces())
+
+
+@mcp.tool()
 async def rank_best_shots(
     photo_scores_json: str, top_n: int = 10
 ) -> str:

@@ -41,12 +41,16 @@ class FaceResult:
     bbox: tuple[int, int, int, int]  # top, right, bottom, left
     embedding: list[float] | None = None
     expression: str = "unknown"
+    gender: str = ""  # "male" or "female"
+    age: int = 0
 
     def to_dict(self) -> dict:
         return {
             "bbox": list(self.bbox),
             "embedding_dim": len(self.embedding) if self.embedding else 0,
             "expression": self.expression,
+            "gender": self.gender,
+            "age": self.age,
         }
 
 
@@ -101,6 +105,7 @@ class RankedPhoto:
     event_type: str
     faces_detected: int
     known_persons: list[str] = field(default_factory=list)
+    has_gps: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -114,4 +119,5 @@ class RankedPhoto:
             "event_type": self.event_type,
             "faces_detected": self.faces_detected,
             "known_persons": self.known_persons,
+            "has_gps": self.has_gps,
         }

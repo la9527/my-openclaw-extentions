@@ -62,6 +62,27 @@ class TestComputeFamilyScore:
         score = compute_family_score(faces)
         assert score == 10.0
 
+    def test_known_person_plus_expression(self):
+        """Known person + happy expression should stack."""
+        faces = [
+            FaceResult(bbox=(0, 0, 0, 0), expression="happy"),
+            FaceResult(bbox=(0, 0, 0, 0), expression="happy"),
+        ]
+        score = compute_family_score(faces, ["Alice"])
+        # 20 (2+ faces) + 25 (1 known) + 20 (2 happy * 10) = 65
+        assert score == 65.0
+
+    def test_gender_age_preserved(self):
+        """Face with gender/age should serialize correctly."""
+        face = FaceResult(
+            bbox=(10, 100, 80, 20),
+            gender="male",
+            age=35,
+        )
+        d = face.to_dict()
+        assert d["gender"] == "male"
+        assert d["age"] == 35
+
 
 class TestComputeEventScore:
     def test_birthday_high_confidence(self):

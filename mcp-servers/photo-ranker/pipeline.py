@@ -1,23 +1,26 @@
 """2-stage classification pipeline.
 
 Stage 1 (Filter): lightweight checks (~180ms/photo)
+  - EXIF metadata extraction + orientation correction
   - technical quality (blur/exposure)
   - duplicate detection
-  - face detection count
+  - face detection + known person matching
 
 Stage 2 (VLM): heavy inference (~5s/photo)
   - scene description via VLM
-  - event classification
+  - event classification (with EXIF GPS correction)
   - final ranking
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
 from engines.aesthetic import score_technical_quality
 from engines.dedup import DedupEngine
+from engines.exif import ExifEngine
 from engines.face import FaceEngine
 from jobs import Job, JobProgress
 from models import DuplicateGroup, EventType, QualityScore, RankedPhoto
@@ -52,6 +55,8 @@ class PhotoCandidate:
     event_type: str = EventType.OTHER.value
     known_persons: list[str] = field(default_factory=list)
     passed_stage1: bool = True
+    has_gps: bool = False
+    faces: list = field(default_factory=list)  # FaceResult list from stage1
 
 
 @dataclass
@@ -66,6 +71,8 @@ class PipelineConfig:
     dedup_threshold: int = 8
     # Stage 2: top-N to run VLM on (0 = all that pass Stage 1)
     vlm_top_n: int = 0
+    # VLM model path (empty = use default)
+    vlm_model_path: str = ""
 
 
 class Pipeline:
@@ -75,6 +82,51 @@ class Pipeline:
         self.config = config or PipelineConfig()
         self._dedup = DedupEngine()
         self._face = FaceEngine()
+        self._exif = ExifEngine()
+        # Known face embeddings: name -> list of embeddings
+        self._known_faces: dict[str, list[list[float]]] = {}
+
+    def register_known_face(self, name: str, embedding: list[float]) -> None:
+        """Register a known person's face embedding for family scoring."""
+        if name not in self._known_faces:
+            self._known_faces[name] = []
+        self._known_faces[name].append(embedding)
+
+    def _identify_known_persons(
+        self, face_embeddings: list[list[float] | None],
+    ) -> list[str]:
+        """Match detected face embeddings against registered known faces."""
+        if not self._known_faces or not face_embeddings:
+            return []
+
+        import numpy as np
+
+        matched_names: list[str] = []
+        for emb in face_embeddings:
+            if emb is None:
+                continue
+            emb_arr = np.array(emb)
+            best_name = None
+            best_sim = 0.0
+
+            for name, known_embs in self._known_faces.items():
+                for known_emb in known_embs:
+                    known_arr = np.array(known_emb)
+                    # Cosine similarity
+                    dot = np.dot(emb_arr, known_arr)
+                    norm = np.linalg.norm(emb_arr) * np.linalg.norm(known_arr)
+                    if norm > 0:
+                        sim = dot / norm
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_name = name
+
+            # Threshold: cosine > 0.4 for same person
+            if best_name and best_sim > 0.4:
+                if best_name not in matched_names:
+                    matched_names.append(best_name)
+
+        return matched_names
 
     async def run(
         self,
@@ -157,16 +209,43 @@ class Pipeline:
         return ranked
 
     async def _stage1(self, photo_id: str, image_b64: str) -> PhotoCandidate:
-        """Lightweight checks: technical quality + face count."""
+        """Lightweight checks: EXIF, orientation, technical quality, face count.
+
+        Runs EXIF/technical/face tasks concurrently for speed.
+        """
         cand = PhotoCandidate(photo_id=photo_id, image_b64=image_b64)
 
-        # Technical quality
-        cand.technical_score = score_technical_quality(image_b64)
+        # EXIF extraction + orientation correction
+        exif_data = self._exif.extract(image_b64)
+        cand.has_gps = exif_data.has_gps
+        if exif_data.orientation != 1:
+            corrected = self._exif.correct_orientation(image_b64)
+            cand.image_b64 = corrected
 
-        # Face detection
-        faces = self._face.detect_faces(image_b64)
+        # Run technical quality and face detection concurrently
+        loop = asyncio.get_event_loop()
+
+        async def _technical() -> float:
+            return await loop.run_in_executor(
+                None, score_technical_quality, cand.image_b64
+            )
+
+        async def _face_detect() -> tuple:
+            faces = await loop.run_in_executor(
+                None, self._face.detect_faces, cand.image_b64
+            )
+            return faces
+
+        tech_score, faces = await asyncio.gather(_technical(), _face_detect())
+
+        cand.technical_score = tech_score
         cand.face_count = len(faces)
-        cand.family_score = compute_family_score(faces)
+        cand.faces = list(faces)
+
+        # Known person matching
+        embeddings = [f.embedding for f in faces]
+        cand.known_persons = self._identify_known_persons(embeddings)
+        cand.family_score = compute_family_score(faces, cand.known_persons or None)
 
         # Quality score (aesthetic defaults to 5.0 in stage1)
         qs = compute_quality_score(5.0, cand.technical_score)
@@ -179,11 +258,38 @@ class Pipeline:
         try:
             from engines.vlm import VLMEngine
 
-            vlm = VLMEngine()
+            model_path = self.config.vlm_model_path or None
+            vlm = VLMEngine(model_path) if model_path else VLMEngine()
             scene = vlm.describe_scene(cand.image_b64)
             cand.scene_description = scene.scene
             cand.event_type = scene.event_type.value
             cand.event_score = compute_event_score(scene)
+
+            # A-1: GPS travel correction — if VLM says outdoor but EXIF has GPS,
+            # boost toward travel (tourists usually have GPS-tagged photos)
+            if (
+                cand.has_gps
+                and scene.event_type == EventType.OUTDOOR
+                and scene.event_confidence < 0.8
+            ):
+                cand.event_type = EventType.TRAVEL.value
+                scene.event_type = EventType.TRAVEL
+                scene.event_confidence = max(scene.event_confidence, 0.5)
+                cand.event_score = compute_event_score(scene)
+                logger.info(
+                    "GPS correction: %s outdoor→travel (GPS present)",
+                    cand.photo_id,
+                )
+
+            # B-2: Apply VLM expressions to detected faces for scoring
+            if scene.expressions and cand.faces:
+                for i, expr in enumerate(scene.expressions):
+                    if i < len(cand.faces):
+                        cand.faces[i].expression = expr.lower()
+                # Recompute family score with expression data
+                cand.family_score = compute_family_score(
+                    cand.faces, cand.known_persons or None
+                )
 
             # Re-score quality with real aesthetic if available
             try:
@@ -206,7 +312,7 @@ class Pipeline:
         photo_hashes: dict[str, str] = {}
         for c in candidates:
             try:
-                h = self._dedup.compute_hash(c.image_b64)
+                h = self._dedup.compute_default_hash(c.image_b64)
                 photo_hashes[c.photo_id] = h
             except Exception as e:
                 logger.warning("Hash failed for %s: %s", c.photo_id, e)
@@ -240,6 +346,7 @@ class Pipeline:
                     event_type=c.event_type,
                     faces_detected=c.face_count,
                     known_persons=c.known_persons,
+                    has_gps=c.has_gps,
                 )
             )
 

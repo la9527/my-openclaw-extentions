@@ -67,3 +67,25 @@ class TestFaceEngineWithMock:
         engine._backend = ""
         result = engine.compare_faces([[0.1] * 128], [0.2] * 128)
         assert result == []
+
+
+class TestFaceGenderAge:
+    def test_face_result_with_gender_age(self):
+        face = FaceResult(
+            bbox=(10, 100, 80, 20),
+            embedding=[0.1] * 512,
+            expression="happy",
+            gender="female",
+            age=28,
+        )
+        d = face.to_dict()
+        assert d["gender"] == "female"
+        assert d["age"] == 28
+        assert d["expression"] == "happy"
+        assert d["embedding_dim"] == 512
+
+    def test_face_result_defaults(self):
+        face = FaceResult(bbox=(0, 0, 0, 0))
+        assert face.gender == ""
+        assert face.age == 0
+        assert face.expression == "unknown"

@@ -107,3 +107,81 @@ class TestJobDB:
         assert loaded.progress.total == 100
         assert loaded.progress.completed == 42
         assert loaded.progress.stage == "vlm"
+
+
+class TestKnownFaces:
+    def test_save_and_load(self, db):
+        emb = [0.1] * 512
+        face_idx = db.save_known_face("Alice", emb)
+        assert face_idx == 0
+
+        faces = db.load_known_faces()
+        assert "Alice" in faces
+        assert len(faces["Alice"]) == 1
+        assert len(faces["Alice"][0]) == 512
+        assert abs(faces["Alice"][0][0] - 0.1) < 1e-5
+
+    def test_multiple_embeddings(self, db):
+        db.save_known_face("Bob", [0.2] * 512)
+        db.save_known_face("Bob", [0.3] * 512)
+
+        faces = db.load_known_faces()
+        assert len(faces["Bob"]) == 2
+
+    def test_list_known_faces(self, db):
+        db.save_known_face("Alice", [0.1] * 128)
+        db.save_known_face("Bob", [0.2] * 128)
+        db.save_known_face("Bob", [0.3] * 128)
+
+        listing = db.list_known_faces()
+        assert len(listing) == 2
+        names = {e["name"]: e["embedding_count"] for e in listing}
+        assert names["Alice"] == 1
+        assert names["Bob"] == 2
+
+    def test_delete_known_face(self, db):
+        db.save_known_face("Charlie", [0.5] * 128)
+        count = db.delete_known_face("Charlie")
+        assert count == 1
+
+        faces = db.load_known_faces()
+        assert "Charlie" not in faces
+
+    def test_delete_nonexistent(self, db):
+        count = db.delete_known_face("Nobody")
+        assert count == 0
+
+
+class TestFaceEmbeddingCache:
+    def test_save_and_load(self, db):
+        emb = [0.5] * 512
+        db.save_face_embedding("photo1", 0, emb, gender="female", age=25, expression="happy")
+
+        loaded = db.load_face_embeddings("photo1")
+        assert len(loaded) == 1
+        assert loaded[0]["face_idx"] == 0
+        assert len(loaded[0]["embedding"]) == 512
+        assert loaded[0]["gender"] == "female"
+        assert loaded[0]["age"] == 25
+        assert loaded[0]["expression"] == "happy"
+
+    def test_multiple_faces(self, db):
+        db.save_face_embedding("photo2", 0, [0.1] * 512)
+        db.save_face_embedding("photo2", 1, [0.2] * 512)
+
+        loaded = db.load_face_embeddings("photo2")
+        assert len(loaded) == 2
+        assert loaded[0]["face_idx"] == 0
+        assert loaded[1]["face_idx"] == 1
+
+    def test_load_empty(self, db):
+        loaded = db.load_face_embeddings("nonexistent")
+        assert loaded == []
+
+    def test_upsert(self, db):
+        db.save_face_embedding("photo3", 0, [0.1] * 128, expression="neutral")
+        db.save_face_embedding("photo3", 0, [0.2] * 128, expression="happy")
+
+        loaded = db.load_face_embeddings("photo3")
+        assert len(loaded) == 1
+        assert loaded[0]["expression"] == "happy"
