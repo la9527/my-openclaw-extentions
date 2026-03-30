@@ -16,8 +16,9 @@ vlm = ["mlx-vlm>=0.1"]
 aesthetic = ["open-clip-torch>=2.24", "torch>=2.0"]
 face = ["mediapipe>=0.10"]
 face-legacy = ["face-recognition>=1.3"]
+apple = ["osxphotos>=0.68"]
 all = [
-    "photo-ranker[vlm,aesthetic,face]",
+    "photo-ranker[vlm,aesthetic,face,apple]",
 ]
 dev = [
     "pytest>=8.0",

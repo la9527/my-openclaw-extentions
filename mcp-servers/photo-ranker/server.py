@@ -241,16 +241,36 @@ def _get_pipeline() -> Pipeline:
 
 async def _run_classify_job(job) -> dict:
     """Handler called by JobQueue to execute classification."""
-    # This is a simplified handler — in production, it would
-    # load photos from photo-source MCP and feed them through the pipeline
+    from sources import load_photos
+
     pipe = _get_pipeline()
     db = _get_job_db()
 
     db.save_job(job)
 
-    # The actual photo loading would happen here via source integration
-    # For now, the pipeline expects photos to be passed via job metadata
-    photos = getattr(job, "_photos", [])
+    # Load known faces from DB into pipeline
+    known = db.load_known_faces()
+    for name, embeddings in known.items():
+        for emb in embeddings:
+            pipe.register_known_face(name, emb)
+
+    # Load photos from source
+    filters = getattr(job, "_filters", {})
+    photos = load_photos(
+        job.source,
+        job.source_path,
+        album=filters.get("album", ""),
+        person=filters.get("person", ""),
+        date_from=filters.get("date_from", ""),
+        date_to=filters.get("date_to", ""),
+        limit=filters.get("limit", 100),
+    )
+
+    if not photos:
+        job.error_message = "No photos found from source"
+        db.save_job(job)
+        return {"ranked_count": 0, "top_score": 0}
+
     ranked = await pipe.run(photos, job)
 
     # Persist results
@@ -268,18 +288,35 @@ async def _run_classify_job(job) -> dict:
 async def start_classify_job(
     source: str,
     source_path: str,
+    album: str = "",
+    person: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 100,
 ) -> str:
     """Start a background photo classification job.
 
     Args:
         source: Photo source — "local", "apple", "gcs"
-        source_path: Directory path or bucket name
+        source_path: Directory path (local), album name (apple), or bucket (gcs)
+        album: Album name filter (Apple Photos only)
+        person: Person name filter (Apple Photos only)
+        date_from: Start date filter (ISO format, optional)
+        date_to: End date filter (ISO format, optional)
+        limit: Maximum number of photos to process
 
     Returns:
         JSON with job_id and status.
     """
     queue = _get_job_queue()
     job = queue.create_job(source, source_path)
+    job._filters = {
+        "album": album,
+        "person": person,
+        "date_from": date_from,
+        "date_to": date_to,
+        "limit": limit,
+    }
 
     db = _get_job_db()
     db.save_job(job)
