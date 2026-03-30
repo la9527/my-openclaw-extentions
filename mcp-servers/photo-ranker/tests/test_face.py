@@ -89,3 +89,39 @@ class TestFaceGenderAge:
         assert face.gender == ""
         assert face.age == 0
         assert face.expression == "unknown"
+
+
+class TestFaceUpscaleRetry:
+    def test_upscale_threshold_is_2400(self):
+        """Verify upscale retry triggers for images under 2400px."""
+        from unittest.mock import call
+        from engines.face import FaceEngine
+
+        engine = FaceEngine()
+        engine._backend = "mediapipe"
+        engine._mp_detector = MagicMock()
+
+        # Mock detect to return empty first, then faces on upscale
+        mp_result_empty = MagicMock()
+        mp_result_empty.detections = []
+        mp_result_upscaled = MagicMock()
+        det = MagicMock()
+        det.bounding_box = MagicMock(origin_x=10, origin_y=10, width=50, height=50)
+        mp_result_upscaled.detections = [det]
+
+        engine._mp_detector.detect.side_effect = [mp_result_empty, mp_result_upscaled]
+
+        # Create a small test image (800px — well under 2400px threshold)
+        import base64
+        import io
+        from PIL import Image
+
+        img = Image.new("RGB", (800, 600), color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+
+        results = engine.detect_faces(b64)
+        # Should have found face on the upscale retry
+        assert len(results) == 1
+        assert engine._mp_detector.detect.call_count == 2

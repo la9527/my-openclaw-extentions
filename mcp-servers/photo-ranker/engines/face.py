@@ -111,7 +111,7 @@ class FaceEngine:
 
         results = self._detect_dispatch(image_b64)
 
-        # Retry with 2x upscale for distant faces in group shots
+        # Retry with progressive upscale for distant faces in group shots
         if not results:
             from PIL import Image
 
@@ -119,9 +119,10 @@ class FaceEngine:
                 img_bytes = base64.b64decode(image_b64)
                 image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 w, h = image.size
-                # Only upscale if image is relatively small (< 1600px)
-                if max(w, h) < 1600:
-                    scale = min(2.0, 1600 / max(w, h))
+                # Try upscale if image is under 2400px (was 1600px)
+                # Helps detect small faces in medium-resolution group photos
+                if max(w, h) < 2400:
+                    scale = min(2.0, 2400 / max(w, h))
                     new_w, new_h = int(w * scale), int(h * scale)
                     upscaled = image.resize((new_w, new_h), Image.LANCZOS)
                     buf = io.BytesIO()

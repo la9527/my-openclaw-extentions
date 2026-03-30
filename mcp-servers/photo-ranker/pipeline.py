@@ -56,6 +56,8 @@ class PhotoCandidate:
     known_persons: list[str] = field(default_factory=list)
     passed_stage1: bool = True
     has_gps: bool = False
+    latitude: float | None = None
+    longitude: float | None = None
     faces: list = field(default_factory=list)  # FaceResult list from stage1
 
 
@@ -218,6 +220,8 @@ class Pipeline:
         # EXIF extraction + orientation correction
         exif_data = self._exif.extract(image_b64)
         cand.has_gps = exif_data.has_gps
+        cand.latitude = exif_data.latitude
+        cand.longitude = exif_data.longitude
         if exif_data.orientation != 1:
             corrected = self._exif.correct_orientation(image_b64)
             cand.image_b64 = corrected
@@ -277,8 +281,27 @@ class Pipeline:
                 scene.event_confidence = max(scene.event_confidence, 0.5)
                 cand.event_score = compute_event_score(scene)
                 logger.info(
-                    "GPS correction: %s outdoor→travel (GPS present)",
+                    "GPS correction: %s outdoor→travel (GPS present, conf=%.2f)",
                     cand.photo_id,
+                    scene.event_confidence,
+                )
+
+            # A-1b: GPS travel correction for daily/portrait with low confidence
+            # — tourist selfies or casual shots at travel destinations
+            if (
+                cand.has_gps
+                and scene.event_type in (EventType.DAILY, EventType.PORTRAIT)
+                and scene.event_confidence < 0.6
+            ):
+                cand.event_type = EventType.TRAVEL.value
+                scene.event_type = EventType.TRAVEL
+                scene.event_confidence = max(scene.event_confidence, 0.4)
+                cand.event_score = compute_event_score(scene)
+                logger.info(
+                    "GPS correction: %s %s→travel (GPS present, low conf=%.2f)",
+                    cand.photo_id,
+                    scene.event_type.value,
+                    scene.event_confidence,
                 )
 
             # B-2: Apply VLM expressions to detected faces for scoring
