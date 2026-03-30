@@ -9,12 +9,13 @@
 | A-3 | Portrait/Daily 경계 명확화 | 인물 비율 정량 기준 프롬프트 추가 | ✅ |
 | B-1 | Known Person 파이프라인 연결 | 가족 임베딩 등록 → 파이프라인 비교 → family_score 활용 | ✅ |
 | B-2 | 표정 분석 기능 | insightface gender/age + VLM expressions 하이브리드 | ✅ |
-| B-3 | Apple Photos 소스 연동 | (향후 작업 — 이미지 연결 필요) | ⏸️ |
+| B-3 | Apple Photos 소스 연동 | osxphotos 소스 + photoscript 앨범 쓰기 | ✅ |
 | C-1 | EXIF 메타데이터 엔진 | GPS, 촬영일, 회전정보 추출 엔진 | ✅ |
 | C-2 | 임베딩 영속화 | SQLite에 얼굴 임베딩 캐시 | ✅ |
 | C-3 | VLM 모델 버전 고정 | model_path를 config로 분리 | ✅ |
 | C-4 | Stage1 병렬화 | face/dedup/technical 병렬 처리 | ✅ |
-| D | 테스트 보강 | 124 tests 통과 (기존 88 + 신규 36) | ✅ |
+| D | 테스트 보강 | 142 tests 통과 (photo-ranker) + 44 tests (photo-source) | ✅ |
+| E | E2E 워크플로우 | classify_and_organize: 소스→분류→앨범 정리 일괄 처리 | ✅ |
 
 ---
 
