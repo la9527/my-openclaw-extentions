@@ -69,9 +69,9 @@ async def run_batch(args: argparse.Namespace) -> None:
     )
     db.save_job(job)
 
-    start = time.time()
+    start = time.perf_counter()
     ranked = await pipeline.run(photos, job)
-    elapsed = time.time() - start
+    elapsed = time.perf_counter() - start
 
     # Save results
     results = [r.to_dict() for r in ranked]
@@ -106,9 +106,9 @@ async def run_batch(args: argparse.Namespace) -> None:
                 f"  unique={r.uniqueness_score:.1f}"
             )
 
-    # Summary
+    # Summary (includes per-stage timing from pipeline)
     if job.result_summary:
-        print(f"\nSummary: {json.dumps(job.result_summary, indent=2)}")
+        print(f"\nSummary: {json.dumps(job.result_summary, indent=2, ensure_ascii=False)}")
 
 
 def main():

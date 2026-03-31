@@ -438,3 +438,41 @@ class TestPhotoCandidateNewFields:
         assert c.event_type == "travel"
         assert c.event_score == 80.0
         assert c.meaningful_score == 9
+
+
+class TestPipelineLogging:
+    """Test that pipeline emits structured timing logs."""
+
+    @pytest.mark.asyncio
+    async def test_run_emits_stage_logs(self, sample_photos, caplog):
+        """Pipeline.run() should log per-stage timing messages."""
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="pipeline"):
+            pipe = Pipeline()
+            await pipe.run(sample_photos)
+
+        messages = caplog.text
+        assert "Pipeline start:" in messages
+        assert "Stage1 done:" in messages
+        assert "Dedup done:" in messages
+        assert "Stage1 filter:" in messages
+        assert "Stage2 start:" in messages
+        assert "Stage2 done:" in messages
+        assert "Pipeline complete:" in messages
+
+    @pytest.mark.asyncio
+    async def test_result_summary_includes_timing(self, sample_photos):
+        """Job.result_summary should include stage timing fields."""
+        pipe = Pipeline()
+        job = Job(id="log-test", source="local", source_path="/test")
+        await pipe.run(sample_photos, job)
+
+        summary = job.result_summary
+        assert summary is not None
+        assert "stage1_s" in summary
+        assert "dedup_s" in summary
+        assert "stage2_s" in summary
+        assert "total_s" in summary
+        assert summary["total_s"] >= 0
+        assert summary["total_input"] == len(sample_photos)

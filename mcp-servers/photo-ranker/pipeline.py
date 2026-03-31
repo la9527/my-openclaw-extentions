@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 import db as db_module
@@ -154,8 +155,12 @@ class Pipeline:
         Returns:
             Ranked list of photos.
         """
+        t_start = time.perf_counter()
+
         if job:
             job.progress = JobProgress(total=len(photos), stage="filter")
+
+        logger.info("Pipeline start: %d photos", len(photos))
 
         # Load existing checkpoints for resume support
         s1_done: dict[str, dict] = {}
@@ -163,6 +168,11 @@ class Pipeline:
         if self._db and job:
             s1_done = self._db.load_checkpoints(job.id, "filter")
             s2_done = self._db.load_checkpoints(job.id, "vlm")
+            if s1_done or s2_done:
+                logger.info(
+                    "Resuming: %d filter checkpoints, %d vlm checkpoints",
+                    len(s1_done), len(s2_done),
+                )
 
         # ── Stage 1: Filter ──
         candidates = []
@@ -181,7 +191,11 @@ class Pipeline:
                 job.progress.completed = i + 1
                 job.progress.current_file = pid
 
+        t_s1 = time.perf_counter() - t_start
+        logger.info("Stage1 done: %d candidates in %.2fs", len(candidates), t_s1)
+
         # Duplicate detection across all
+        t_dedup_start = time.perf_counter()
         dup_groups = self._detect_duplicates(candidates)
 
         # Mark duplicates
@@ -198,9 +212,24 @@ class Pipeline:
             if c.technical_score < self.config.min_technical_score:
                 c.passed_stage1 = False
 
+        t_dedup = time.perf_counter() - t_dedup_start
+        logger.info(
+            "Dedup done: %d duplicates found in %.2fs",
+            len(dup_photo_ids), t_dedup,
+        )
+
         # Compute uniqueness for all
         for c in candidates:
             c.uniqueness_score = compute_uniqueness_score(c.photo_id, dup_groups)
+
+        passed_count = sum(1 for c in candidates if c.passed_stage1)
+        filtered_count = len(candidates) - passed_count
+        logger.info(
+            "Stage1 filter: %d passed, %d filtered (quality=%d, dup=%d)",
+            passed_count, filtered_count,
+            sum(1 for c in candidates if c.technical_score < self.config.min_technical_score),
+            len(dup_photo_ids),
+        )
 
         # ── Stage 2: VLM (only for candidates that passed) ──
         stage2_candidates = [c for c in candidates if c.passed_stage1]
@@ -211,10 +240,14 @@ class Pipeline:
                 reverse=True,
             )[: self.config.vlm_top_n]
 
+        t_s2_start = time.perf_counter()
+
         if job:
             job.progress.stage = "vlm"
             job.progress.completed = 0
             job.progress.total = len(stage2_candidates)
+
+        logger.info("Stage2 start: %d candidates for VLM", len(stage2_candidates))
 
         for i, cand in enumerate(stage2_candidates):
             if cand.photo_id in s2_done:
@@ -230,8 +263,19 @@ class Pipeline:
                 job.progress.completed = i + 1
                 job.progress.current_file = cand.photo_id
 
+        t_s2 = time.perf_counter() - t_s2_start
+        logger.info("Stage2 done: %d processed in %.2fs", len(stage2_candidates), t_s2)
+
         # ── Rank results ──
         ranked = self._rank(candidates, dup_groups)
+
+        t_total = time.perf_counter() - t_start
+        stage_times = {
+            "stage1_s": round(t_s1, 2),
+            "dedup_s": round(t_dedup, 2),
+            "stage2_s": round(t_s2, 2),
+            "total_s": round(t_total, 2),
+        }
 
         if job:
             job.result_summary = {
@@ -239,11 +283,19 @@ class Pipeline:
                 "passed_stage1": len(stage2_candidates),
                 "duplicates_found": len(dup_photo_ids),
                 "ranked_count": len(ranked),
+                **stage_times,
             }
 
         # Clear checkpoints on successful completion
         if self._db and job:
             self._db.clear_checkpoints(job.id)
+
+        logger.info(
+            "Pipeline complete: %d→%d ranked in %.2fs "
+            "(s1=%.2fs, dedup=%.2fs, s2=%.2fs)",
+            len(photos), len(ranked), t_total,
+            t_s1, t_dedup, t_s2,
+        )
 
         return ranked
 
@@ -311,8 +363,10 @@ class Pipeline:
             from engines.vlm import VLMEngine
 
             if self._vlm is None:
+                t_init = time.perf_counter()
                 model_path = self.config.vlm_model_path or None
                 self._vlm = VLMEngine(model_path) if model_path else VLMEngine()
+                logger.info("VLM engine init: %.2fs", time.perf_counter() - t_init)
             scene = self._vlm.describe_scene(cand.image_b64)
             cand.scene_description = scene.scene
             cand.event_type = scene.event_type.value
@@ -383,7 +437,9 @@ class Pipeline:
                 from engines.aesthetic import AestheticEngine
 
                 if self._aesthetic is None:
+                    t_ae = time.perf_counter()
                     self._aesthetic = AestheticEngine()
+                    logger.info("Aesthetic engine init: %.2fs", time.perf_counter() - t_ae)
                 aesthetic_raw = self._aesthetic.score(cand.image_b64)
                 qs = compute_quality_score(aesthetic_raw, cand.technical_score)
                 cand.quality_score = qs.total
