@@ -38,9 +38,17 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     debug?: (...args: unknown[]) => void;
   }
 
+  export type OpenClawPluginHttpRouteParams = {
+    path: string;
+    auth: "plugin" | "gateway";
+    match?: "exact" | "prefix";
+    handler: (req: unknown, res: unknown) => boolean | void | Promise<boolean | void>;
+  };
+
   export interface OpenClawPluginApi {
     pluginConfig?: Record<string, unknown>;
     registerCommand: (command: OpenClawPluginCommandDefinition) => void;
+    registerHttpRoute: (params: OpenClawPluginHttpRouteParams) => void;
     logger: PluginLogger;
   }
 

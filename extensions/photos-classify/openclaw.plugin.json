@@ -26,6 +26,21 @@
         "description": "photo-source MCP 서버 디렉터리 경로",
         "default": "./mcp-servers/photo-source"
       },
+      "reviewAppUrl": {
+        "type": "string",
+        "description": "photo-ranker review_app.py 로컬 HTTP 주소",
+        "default": "http://127.0.0.1:8765"
+      },
+      "reviewAppAutoStart": {
+        "type": "boolean",
+        "description": "review route 또는 review API 접근 시 review_app.py 자동 기동 여부",
+        "default": true
+      },
+      "reviewAccessToken": {
+        "type": "string",
+        "description": "원격 review route 접근에 사용할 선택적 토큰. 비워두면 로컬 브라우저만 허용됩니다.",
+        "default": ""
+      },
       "defaultSource": {
         "type": "string",
         "enum": ["local", "apple", "google", "gcs"],

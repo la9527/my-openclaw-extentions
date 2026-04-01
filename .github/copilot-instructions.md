@@ -20,6 +20,9 @@
 - 구현을 바꾸면 가능한 범위에서 코드, 테스트, 설정 설명, 문서를 함께 갱신한다.
 - 변경은 최소 범위로 유지하고, smart-router 외 영역을 불필요하게 일반화하지 않는다.
 - OpenClaw 본체 동작을 참고할 수는 있지만, 이 저장소의 주 변경 대상은 `extensions/smart-router/` 와 관련 문서다.
+- `/Volumes/ExtData/OpenClaw` 는 소스 참고 전용이다. 해당 저장소 파일은 수정하지 않는다.
+- `/Volumes/ExtData/OpenClaw` 내부 스크립트와 로컬 개발 명령은 실행하지 않는다. 검증이나 운영 확인은 글로벌로 설치된 `openclaw` CLI 기준으로만 수행한다.
+- OpenClaw 런타임 검증, 설정 확인, 플러그인 반영은 글로벌 설치본과 `~/.openclaw/*` 기준으로 진행한다.
 - 실제 실행 OpenClaw가 글로벌 npm 설치본일 수 있으므로, UI 표시 문제는 이 저장소 플러그인 레이어에서 우회해야 하는지 먼저 확인한다.
 
 ## smart-router 현재 기준

@@ -15,6 +15,7 @@ VLM(Vision Language Model), CLIP 기반 미적 평가, 얼굴 인식, 중복 감
 - **Apple Photos 연동** — osxphotos 읽기 + photoscript 앨범 쓰기
 - **백그라운드 Job 시스템** — 대량 분류 작업을 비동기 Job으로 관리
 - **SQLite 영속성** — Job 상태와 분류 결과를 DB에 저장
+- **검토 WebUI** — preview, 얼굴 crop, selected/tag/note 편집용 로컬 리뷰 UI
 - **배치 CLI** — 커맨드라인에서 직접 분류 작업 실행
 
 ## 요구 사항
@@ -93,6 +94,16 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | `import_and_organize` | 외부 사진 가져오기 + 분류별 앨범 정리 | `photo_paths_json`, `results_json` |
 | `list_photo_albums` | Apple Photos 앨범 목록 조회 | — |
 
+### 검토/선택 도구 (5개)
+
+| 도구 | 설명 | 주요 파라미터 |
+|---|---|---|
+| `get_review_items` | preview/selected/tags/note 포함 검토 목록 | `job_id`, `top_n?`, `selected_only?` |
+| `set_photo_review` | selected/tags/note 저장 | `job_id`, `photo_id`, `tags_json?`, `selected?`, `note?` |
+| `list_photo_faces` | 얼굴 crop/bbox/속성 조회 | `job_id`, `photo_id` |
+| `label_face_in_job` | 얼굴 이름 지정 및 known face 등록 | `job_id`, `photo_id`, `face_idx`, `name` |
+| `export_selected_photos` | selected=true 사진만 디렉터리로 export | `job_id`, `output_dir`, `group_by_date?`, `mode?` |
+
 ### E2E 워크플로우 도구 (1개)
 
 | 도구 | 설명 | 주요 파라미터 |
@@ -151,9 +162,35 @@ photo-ranker/
 ├── album_writer.py     # Apple Photos 앨범 쓰기 (photoscript)
 ├── db.py               # SQLite 영속성 (WAL 모드)
 ├── batch_classify.py   # 배치 CLI
+├── review_app.py       # 로컬 검토 WebUI + artifact HTTP 서버
+├── artifacts.py        # preview/face crop artifact 저장
+├── local_writer.py     # 로컬 디렉터리 write-back
 ├── pyproject.toml
 └── tests/              # 213개+ 테스트
 ```
+
+## Review WebUI
+
+```bash
+cd mcp-servers/photo-ranker
+uv sync --extra review --extra dev
+uv run review_app.py
+```
+
+이후 브라우저에서 아래 주소로 접속합니다.
+
+```text
+http://127.0.0.1:8765/review/<job_id>
+```
+
+이 화면에서 아래 작업을 수행할 수 있습니다.
+
+- preview 이미지 검토
+- selected 토글
+- tags / note 편집
+- 얼굴 crop 확인
+- 얼굴 이름 지정 및 known face 등록
+- selected-only export 실행
 
 ## 테스트
 

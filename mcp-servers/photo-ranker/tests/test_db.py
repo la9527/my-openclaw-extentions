@@ -155,12 +155,21 @@ class TestKnownFaces:
 class TestFaceEmbeddingCache:
     def test_save_and_load(self, db):
         emb = [0.5] * 512
-        db.save_face_embedding("photo1", 0, emb, gender="female", age=25, expression="happy")
+        db.save_face_embedding(
+            "photo1",
+            0,
+            emb,
+            bbox=[10, 100, 90, 20],
+            gender="female",
+            age=25,
+            expression="happy",
+        )
 
         loaded = db.load_face_embeddings("photo1")
         assert len(loaded) == 1
         assert loaded[0]["face_idx"] == 0
         assert len(loaded[0]["embedding"]) == 512
+        assert loaded[0]["bbox"] == [10, 100, 90, 20]
         assert loaded[0]["gender"] == "female"
         assert loaded[0]["age"] == 25
         assert loaded[0]["expression"] == "happy"
@@ -248,3 +257,57 @@ class TestStageCheckpoints:
         loaded = db.load_photo_results("job1")
         assert loaded[0]["meaningful_score"] == 9
         assert loaded[0]["capture_date"] == "2026-03-15"
+
+
+class TestReviewMetadata:
+    def test_save_and_update_job_asset(self, db):
+        db.save_job_asset("job1", "photo1", "/tmp/p1.jpg", "/photos/p1.jpg")
+        updated = db.update_photo_review(
+            "job1",
+            "photo1",
+            tags=["selected", "family"],
+            selected=True,
+            note="대표컷",
+        )
+
+        assets = db.list_job_assets("job1")
+        assert assets["photo1"]["preview_path"] == "/tmp/p1.jpg"
+        assert assets["photo1"]["source_photo_path"] == "/photos/p1.jpg"
+        assert assets["photo1"]["selected"] is True
+        assert assets["photo1"]["tags"] == ["selected", "family"]
+        assert updated["note"] == "대표컷"
+
+    def test_save_and_label_face_review(self, db):
+        db.save_face_review(
+            "job1",
+            "photo1",
+            0,
+            bbox=[10, 100, 90, 20],
+            crop_path="/tmp/f0.jpg",
+        )
+        db.label_face_review("job1", "photo1", 0, "Alice")
+
+        reviews = db.list_face_reviews("job1", "photo1")
+        assert reviews[0]["bbox"] == [10, 100, 90, 20]
+        assert reviews[0]["crop_path"] == "/tmp/f0.jpg"
+        assert reviews[0]["label_name"] == "Alice"
+
+
+class TestStaleJobRepair:
+    def test_repairs_pending_jobs_with_result_summary(self, tmp_path):
+        db_path = tmp_path / "jobs.db"
+
+        first = JobDB(db_path)
+        job = Job(id="stale", source="local", source_path="/photos")
+        job.result_summary = {"ranked_count": 1}
+        first.save_job(job)
+        first.close()
+
+        repaired = JobDB(db_path)
+        loaded = repaired.load_job("stale")
+
+        assert loaded is not None
+        assert loaded.status == JobStatus.COMPLETED
+        assert loaded.started_at is not None
+        assert loaded.finished_at is not None
+        repaired.close()

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from mcp.server.fastmcp import FastMCP
 
+from artifacts import save_face_crop, save_preview
+from album_writer import AlbumWriter
+from local_writer import LocalDirectoryWriter
 from engines.aesthetic import AestheticEngine, score_technical_quality
 from engines.dedup import DedupEngine
 from engines.face import FaceEngine
@@ -320,12 +324,15 @@ async def _run_classify_job(job) -> dict:
         limit=filters.get("limit", 100),
     )
 
+    _cache_job_review_assets(job, photos)
+
     if not photos:
         job.error_message = "No photos found from source"
         db.save_job(job)
         return {"ranked_count": 0, "top_score": 0}
 
     ranked = await pipe.run(photos, job)
+    _cache_face_review_assets(job, photos)
 
     # Persist results
     results = [r.to_dict() for r in ranked]
@@ -453,9 +460,8 @@ async def list_jobs(status: str = "") -> str:
 
 # ── Album Management Tools ────────────────────────────
 
-from album_writer import AlbumWriter
-
 _album_writer: AlbumWriter | None = None
+_local_writer: LocalDirectoryWriter | None = None
 
 
 def _get_album_writer() -> AlbumWriter:
@@ -463,6 +469,108 @@ def _get_album_writer() -> AlbumWriter:
     if _album_writer is None:
         _album_writer = AlbumWriter()
     return _album_writer
+
+
+def _get_local_writer() -> LocalDirectoryWriter:
+    global _local_writer
+    if _local_writer is None:
+        _local_writer = LocalDirectoryWriter()
+    return _local_writer
+
+
+def _cache_job_review_assets(job, photos: list[dict]) -> None:
+    """Persist preview files and source paths for later review in WebUI."""
+    db = _get_job_db()
+    for photo in photos:
+        try:
+            preview_path = save_preview(job.id, photo["photo_id"], photo["image_b64"])
+        except Exception as exc:
+            logger.warning("Preview cache failed for %s: %s", photo["photo_id"], exc)
+            preview_path = ""
+        source_photo_path = photo.get("source_photo_path") or (
+            photo["photo_id"] if job.source == "local" else ""
+        )
+        db.save_job_asset(job.id, photo["photo_id"], preview_path, source_photo_path)
+
+
+def _cache_face_review_assets(job, photos: list[dict]) -> None:
+    """Persist face crop artifacts for human review / manual labeling."""
+    db = _get_job_db()
+    photo_map = {photo["photo_id"]: photo["image_b64"] for photo in photos}
+    for photo_id, image_b64 in photo_map.items():
+        for face in db.load_face_embeddings(photo_id):
+            bbox = face.get("bbox") or []
+            crop_path = ""
+            if bbox:
+                try:
+                    crop_path = save_face_crop(
+                        job.id,
+                        photo_id,
+                        face["face_idx"],
+                        bbox,
+                        image_b64,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Face crop cache failed for %s#%s: %s",
+                        photo_id,
+                        face["face_idx"],
+                        exc,
+                    )
+            db.save_face_review(
+                job.id,
+                photo_id,
+                face["face_idx"],
+                bbox=bbox,
+                crop_path=crop_path,
+            )
+
+
+def _build_review_items(
+    db: JobDB,
+    job_id: str,
+    top_n: int = 50,
+    selected_only: bool = False,
+) -> list[dict]:
+    """Merge ranked results with preview and manual-review metadata."""
+    results = db.load_photo_results(job_id)
+    assets = db.list_job_assets(job_id)
+
+    merged = []
+    for result in results:
+        asset = assets.get(result["photo_id"], {})
+        item = {
+            **result,
+            "preview_path": asset.get("preview_path", ""),
+            "source_photo_path": asset.get("source_photo_path", ""),
+            "review_tags": asset.get("tags", []),
+            "selected": asset.get("selected", False),
+            "note": asset.get("note", ""),
+        }
+        if selected_only and not item["selected"]:
+            continue
+        merged.append(item)
+    return merged[:top_n]
+
+
+def _build_face_items(db: JobDB, job_id: str, photo_id: str) -> list[dict]:
+    """Merge cached face embeddings with human review state."""
+    reviews = {
+        item["face_idx"]: item for item in db.list_face_reviews(job_id, photo_id)
+    }
+    faces = []
+    for item in db.load_face_embeddings(photo_id):
+        review = reviews.get(item["face_idx"], {})
+        faces.append({
+            "face_idx": item["face_idx"],
+            "bbox": review.get("bbox") or item.get("bbox", []),
+            "crop_path": review.get("crop_path", ""),
+            "label_name": review.get("label_name", ""),
+            "gender": item.get("gender", ""),
+            "age": item.get("age", 0),
+            "expression": item.get("expression", "unknown"),
+        })
+    return faces
 
 
 @mcp.tool()
@@ -533,6 +641,165 @@ async def organize_results(
         results, album_prefix, folder, min_score, group_by_date=group_by_date,
     )
     return json.dumps(result)
+
+
+@mcp.tool()
+async def organize_results_to_directory(
+    job_id: str,
+    output_dir: str,
+    min_score: float = 0.0,
+    group_by_date: bool = False,
+    mode: str = "copy",
+) -> str:
+    """로컬 분류 결과를 디렉터리 구조로 복사/하드링크합니다."""
+    db = _get_job_db()
+    job = db.load_job(job_id)
+    if not job:
+        return json.dumps({"error": f"Job {job_id} not found"})
+    if job.source != "local":
+        return json.dumps({
+            "error": "organize_results_to_directory currently supports local jobs only",
+            "source": job.source,
+            "hint": "Use organize_results for Apple Photos library write-back.",
+        })
+
+    results = db.load_photo_results(job_id)
+    writer = _get_local_writer()
+    return json.dumps(
+        writer.organize_by_classification(
+            results,
+            output_dir,
+            min_score=min_score,
+            group_by_date=group_by_date,
+            mode=mode,
+        ),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+async def get_review_items(
+    job_id: str,
+    top_n: int = 50,
+    selected_only: bool = False,
+) -> str:
+    """분류 결과를 WebUI 검토용 preview/tag 메타와 함께 반환합니다."""
+    db = _get_job_db()
+    return json.dumps(
+        _build_review_items(db, job_id, top_n=top_n, selected_only=selected_only),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+async def set_photo_review(
+    job_id: str,
+    photo_id: str,
+    tags_json: str = "[]",
+    selected: bool = False,
+    note: str = "",
+) -> str:
+    """분류된 사진의 선택 여부, 태그, 메모를 저장합니다."""
+    db = _get_job_db()
+    tags = json.loads(tags_json)
+    updated = db.update_photo_review(
+        job_id,
+        photo_id,
+        tags=tags,
+        selected=selected,
+        note=note,
+    )
+    return json.dumps(updated, ensure_ascii=False)
+
+
+@mcp.tool()
+async def export_selected_photos(
+    job_id: str,
+    output_dir: str,
+    min_score: float = 0.0,
+    group_by_date: bool = False,
+    mode: str = "copy",
+) -> str:
+    """선택된(selected=true) 사진만 출력 디렉터리로 내보냅니다."""
+    db = _get_job_db()
+    selected_items = _build_review_items(
+        db,
+        job_id,
+        top_n=100000,
+        selected_only=True,
+    )
+    if not selected_items:
+        return json.dumps({
+            "job_id": job_id,
+            "selected_count": 0,
+            "exported": 0,
+            "message": "No selected photos found",
+        })
+
+    exportable = []
+    missing_paths = []
+    for item in selected_items:
+        source_path = item.get("source_photo_path", "")
+        if not source_path:
+            missing_paths.append(item["photo_id"])
+            continue
+        exportable.append({**item, "photo_id": source_path})
+
+    result = _get_local_writer().organize_by_classification(
+        exportable,
+        output_dir,
+        min_score=min_score,
+        group_by_date=group_by_date,
+        mode=mode,
+    )
+    result["job_id"] = job_id
+    result["selected_count"] = len(selected_items)
+    if missing_paths:
+        result["missing_source_paths"] = missing_paths
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_photo_faces(job_id: str, photo_id: str) -> str:
+    """검토 UI에서 사용할 얼굴 crop/bbox/속성 목록을 반환합니다."""
+    db = _get_job_db()
+    return json.dumps(_build_face_items(db, job_id, photo_id), ensure_ascii=False)
+
+
+@mcp.tool()
+async def label_face_in_job(
+    job_id: str,
+    photo_id: str,
+    face_idx: int,
+    name: str,
+    register_known_face: bool = True,
+) -> str:
+    """검토된 얼굴에 이름을 붙이고 필요하면 known face로 등록합니다."""
+    db = _get_job_db()
+    cached = db.load_face_embeddings(photo_id)
+    match = next((item for item in cached if item["face_idx"] == face_idx), None)
+    if not match:
+        return json.dumps({
+            "error": f"Face index {face_idx} not found for photo {photo_id}",
+        })
+
+    db.label_face_review(job_id, photo_id, face_idx, name)
+    registration = None
+    if register_known_face:
+        registration = {
+            "name": name,
+            "face_idx": db.save_known_face(name, match["embedding"]),
+            "embedding_dim": len(match["embedding"]),
+        }
+
+    return json.dumps({
+        "job_id": job_id,
+        "photo_id": photo_id,
+        "face_idx": face_idx,
+        "label_name": name,
+        "known_face_registration": registration,
+        "reclassify_recommended": True,
+    }, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -661,9 +928,14 @@ async def classify_and_organize(
     # Create job for tracking
     queue = _get_job_queue()
     job = queue.create_job(source, source_path)
+    job.status = JobStatus.RUNNING
+    job.started_at = time.time()
     db.save_job(job)
 
+    _cache_job_review_assets(job, photos)
+
     ranked = await pipe.run(photos, job)
+    _cache_face_review_assets(job, photos)
     results = [r.to_dict() for r in ranked]
     db.save_photo_results(job.id, results)
     db.save_job(job)
@@ -678,12 +950,18 @@ async def classify_and_organize(
     else:
         album_result = {"albums_created": [], "photos_organized": 0, "skipped": 0}
 
-    return json.dumps({
+    summary = {
         "job_id": job.id,
         "ranked_count": len(ranked),
         "top_score": ranked[0].total_score if ranked else 0,
         **album_result,
-    })
+    }
+    job.status = JobStatus.COMPLETED
+    job.finished_at = time.time()
+    job.result_summary = summary
+    db.save_job(job)
+
+    return json.dumps(summary)
 
 
 if __name__ == "__main__":

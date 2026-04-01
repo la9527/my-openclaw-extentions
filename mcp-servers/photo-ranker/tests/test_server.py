@@ -88,6 +88,7 @@ class TestToolRegistration:
         assert callable(getattr(server, "create_album", None))
         assert callable(getattr(server, "add_to_album", None))
         assert callable(getattr(server, "organize_results", None))
+        assert callable(getattr(server, "organize_results_to_directory", None))
         assert callable(getattr(server, "import_photos", None))
         assert callable(getattr(server, "import_and_organize", None))
         assert callable(getattr(server, "list_photo_albums", None))
@@ -104,6 +105,15 @@ class TestToolRegistration:
         assert callable(getattr(server, "list_known_faces", None))
         assert callable(getattr(server, "register_face_from_job", None))
         assert callable(getattr(server, "delete_known_face", None))
+        assert callable(getattr(server, "list_photo_faces", None))
+        assert callable(getattr(server, "label_face_in_job", None))
+
+    def test_mcp_has_review_tools(self):
+        import server
+
+        assert callable(getattr(server, "get_review_items", None))
+        assert callable(getattr(server, "set_photo_review", None))
+        assert callable(getattr(server, "export_selected_photos", None))
 
 
 class TestRegisterFaceFromJob:
@@ -182,3 +192,128 @@ class TestDeleteKnownFace:
         parsed = json.loads(result)
         assert parsed["name"] == "Alice"
         assert parsed["deleted_embeddings"] == 3
+
+
+class TestReviewTools:
+    @pytest.mark.asyncio
+    async def test_get_review_items_merges_assets(self):
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.load_photo_results.return_value = [
+            {"photo_id": "p1", "total_score": 90.0, "event_type": "travel"},
+        ]
+        mock_db.list_job_assets.return_value = {
+            "p1": {
+                "preview_path": "/tmp/p1.jpg",
+                "source_photo_path": "/photos/p1.jpg",
+                "tags": ["family"],
+                "selected": True,
+                "note": "pick",
+            }
+        }
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.get_review_items("job1")
+
+        parsed = json.loads(result)
+        assert parsed[0]["preview_path"] == "/tmp/p1.jpg"
+        assert parsed[0]["selected"] is True
+        assert parsed[0]["review_tags"] == ["family"]
+
+    @pytest.mark.asyncio
+    async def test_label_face_in_job_registers_known_face(self):
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_db.load_face_embeddings.return_value = [
+            {"face_idx": 1, "embedding": [0.1] * 128},
+        ]
+        mock_db.save_known_face.return_value = 2
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.label_face_in_job("job1", "photo1", 1, "Alice")
+
+        parsed = json.loads(result)
+        assert parsed["label_name"] == "Alice"
+        assert parsed["known_face_registration"]["face_idx"] == 2
+
+    @pytest.mark.asyncio
+    async def test_export_selected_photos_uses_source_paths(self):
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_db = MagicMock()
+        mock_writer = MagicMock()
+        mock_writer.organize_by_classification.return_value = {"copied": 1, "skipped": 0, "failed": []}
+        mock_db.load_photo_results.return_value = [
+            {"photo_id": "uuid-1", "event_type": "travel", "total_score": 88.0},
+        ]
+        mock_db.list_job_assets.return_value = {
+            "uuid-1": {
+                "preview_path": "/tmp/p1.jpg",
+                "source_photo_path": "/photos/p1.jpg",
+                "tags": ["best"],
+                "selected": True,
+                "note": "",
+            }
+        }
+
+        with patch.object(server, "_get_job_db", return_value=mock_db), patch.object(server, "_get_local_writer", return_value=mock_writer):
+            result = await server.export_selected_photos("job1", "/tmp/out")
+
+        parsed = json.loads(result)
+        assert parsed["selected_count"] == 1
+        called_results = mock_writer.organize_by_classification.call_args.args[0]
+        assert called_results[0]["photo_id"] == "/photos/p1.jpg"
+
+
+class TestClassifyAndOrganizeWorkflow:
+    @pytest.mark.asyncio
+    async def test_classify_and_organize_marks_job_completed(self):
+        import server
+        from jobs import Job
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        job = Job(id="job-sync", source="local", source_path="/photos")
+        mock_queue = MagicMock()
+        mock_queue.create_job.return_value = job
+
+        mock_db = MagicMock()
+        mock_db.load_known_faces.return_value = {}
+
+        mock_ranked = [MagicMock(total_score=88.0, to_dict=lambda: {
+            "photo_id": "p1",
+            "total_score": 88.0,
+        })]
+        mock_pipeline = MagicMock()
+        mock_pipeline.run = AsyncMock(return_value=mock_ranked)
+
+        with patch("sources.load_photos", return_value=[{
+            "photo_id": "p1",
+            "image_b64": "abc",
+            "source_photo_path": "/photos/p1.jpg",
+        }]), patch.object(server, "_get_job_queue", return_value=mock_queue), patch.object(
+            server,
+            "_get_job_db",
+            return_value=mock_db,
+        ), patch.object(server, "_get_pipeline", return_value=mock_pipeline), patch.object(
+            server,
+            "_cache_job_review_assets",
+        ), patch.object(server, "_cache_face_review_assets"):
+            result = await server.classify_and_organize(
+                source="local",
+                source_path="/photos",
+                limit=1,
+            )
+
+        parsed = json.loads(result)
+        assert parsed["job_id"] == "job-sync"
+        assert parsed["ranked_count"] == 1
+        assert job.status.value == "completed"
+        assert job.started_at is not None
+        assert job.finished_at is not None
+        assert job.result_summary == parsed
+        assert mock_db.save_job.call_count >= 2

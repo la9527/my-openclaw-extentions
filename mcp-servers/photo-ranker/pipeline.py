@@ -343,6 +343,7 @@ class Pipeline:
                 if f.embedding:
                     self._db.save_face_embedding(
                         photo_id, i, f.embedding,
+                        bbox=list(f.bbox),
                         gender=f.gender, age=f.age, expression=f.expression,
                     )
 

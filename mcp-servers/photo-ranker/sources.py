@@ -81,7 +81,13 @@ def _load_local(
 
         try:
             b64 = _image_to_b64(Image.open(path), max_size)
-            results.append({"photo_id": str(path), "image_b64": b64})
+            results.append(
+                {
+                    "photo_id": str(path),
+                    "image_b64": b64,
+                    "source_photo_path": str(path),
+                }
+            )
         except Exception:
             logger.warning("Failed to load image: %s", path)
             continue
@@ -163,7 +169,13 @@ def _load_apple(
         try:
             img = Image.open(p.path)
             b64 = _image_to_b64(img, max_size)
-            results.append({"photo_id": p.uuid, "image_b64": b64})
+            results.append(
+                {
+                    "photo_id": p.uuid,
+                    "image_b64": b64,
+                    "source_photo_path": p.path,
+                }
+            )
         except Exception:
             logger.warning("Failed to load Apple photo: %s (%s)", p.uuid, p.filename)
             continue

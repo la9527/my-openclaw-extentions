@@ -78,11 +78,41 @@ class JobDB:
                 photo_id TEXT NOT NULL,
                 face_idx INTEGER NOT NULL,
                 embedding BLOB NOT NULL,
+                bbox_json TEXT DEFAULT '[]',
                 gender TEXT DEFAULT '',
                 age INTEGER DEFAULT 0,
                 expression TEXT DEFAULT 'unknown',
                 PRIMARY KEY (photo_id, face_idx)
             );
+
+            CREATE TABLE IF NOT EXISTS job_assets (
+                job_id TEXT NOT NULL,
+                photo_id TEXT NOT NULL,
+                preview_path TEXT DEFAULT '',
+                source_photo_path TEXT DEFAULT '',
+                tags_json TEXT DEFAULT '[]',
+                selected INTEGER DEFAULT 0,
+                note TEXT DEFAULT '',
+                PRIMARY KEY (job_id, photo_id),
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_assets_job
+                ON job_assets(job_id);
+
+            CREATE TABLE IF NOT EXISTS face_reviews (
+                job_id TEXT NOT NULL,
+                photo_id TEXT NOT NULL,
+                face_idx INTEGER NOT NULL,
+                bbox_json TEXT DEFAULT '[]',
+                crop_path TEXT DEFAULT '',
+                label_name TEXT DEFAULT '',
+                PRIMARY KEY (job_id, photo_id, face_idx),
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_face_reviews_job
+                ON face_reviews(job_id, photo_id);
 
             CREATE TABLE IF NOT EXISTS stage_checkpoints (
                 job_id TEXT NOT NULL,
@@ -98,7 +128,35 @@ class JobDB:
                 ON stage_checkpoints(job_id, stage);
             """
         )
+        self._ensure_column("face_embeddings", "bbox_json", "TEXT DEFAULT '[]'")
+        self._repair_stale_jobs()
         self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        columns = {row[1] for row in rows}
+        if column not in columns:
+            self._conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+
+    def _repair_stale_jobs(self) -> None:
+        """Repair impossible persisted job states left by older sync workflow code."""
+        repaired = self._conn.execute(
+            """
+            UPDATE jobs
+            SET
+                status = 'completed',
+                started_at = COALESCE(started_at, created_at),
+                finished_at = COALESCE(finished_at, created_at)
+            WHERE
+                status = 'pending'
+                AND result_json IS NOT NULL
+                AND error_message IS NULL
+            """
+        ).rowcount
+        if repaired:
+            logger.info("Repaired %d stale pending job records", repaired)
 
     def save_job(self, job: Job) -> None:
         """Insert or replace a job record."""
@@ -204,6 +262,97 @@ class JobDB:
             }
             for r in rows
         ]
+
+    def save_job_asset(
+        self,
+        job_id: str,
+        photo_id: str,
+        preview_path: str = "",
+        source_photo_path: str = "",
+    ) -> None:
+        """Persist preview/source paths used by review UIs."""
+        self._conn.execute(
+            """
+            INSERT INTO job_assets
+                (job_id, photo_id, preview_path, source_photo_path)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_id, photo_id) DO UPDATE SET
+                preview_path = excluded.preview_path,
+                source_photo_path = excluded.source_photo_path
+            """,
+            (job_id, photo_id, preview_path, source_photo_path),
+        )
+        self._conn.commit()
+
+    def update_photo_review(
+        self,
+        job_id: str,
+        photo_id: str,
+        tags: list[str] | None = None,
+        selected: bool | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Update review metadata for a classified photo."""
+        current = self.list_job_assets(job_id).get(
+            photo_id,
+            {
+                "job_id": job_id,
+                "photo_id": photo_id,
+                "preview_path": "",
+                "source_photo_path": "",
+                "tags": [],
+                "selected": False,
+                "note": "",
+            },
+        )
+        next_tags = current["tags"] if tags is None else tags
+        next_selected = current["selected"] if selected is None else bool(selected)
+        next_note = current["note"] if note is None else note
+
+        self._conn.execute(
+            """
+            INSERT INTO job_assets
+                (job_id, photo_id, preview_path, source_photo_path, tags_json, selected, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, photo_id) DO UPDATE SET
+                tags_json = excluded.tags_json,
+                selected = excluded.selected,
+                note = excluded.note
+            """,
+            (
+                job_id,
+                photo_id,
+                current["preview_path"],
+                current["source_photo_path"],
+                json.dumps(next_tags, ensure_ascii=False),
+                1 if next_selected else 0,
+                next_note,
+            ),
+        )
+        self._conn.commit()
+        current["tags"] = next_tags
+        current["selected"] = next_selected
+        current["note"] = next_note
+        return current
+
+    def list_job_assets(self, job_id: str) -> dict[str, dict]:
+        """Load preview/source/review metadata for a job."""
+        rows = self._conn.execute(
+            "SELECT * FROM job_assets WHERE job_id = ?",
+            (job_id,),
+        ).fetchall()
+        return {
+            row["photo_id"]: {
+                "job_id": row["job_id"],
+                "photo_id": row["photo_id"],
+                "preview_path": row["preview_path"],
+                "source_photo_path": row["source_photo_path"],
+                "tags": json.loads(row["tags_json"] or "[]"),
+                "selected": bool(row["selected"]),
+                "note": row["note"] or "",
+            }
+            for row in rows
+        }
 
     def close(self) -> None:
         if self._conn:
@@ -315,6 +464,7 @@ class JobDB:
         photo_id: str,
         face_idx: int,
         embedding: list[float],
+        bbox: list[int] | tuple[int, int, int, int] | None = None,
         gender: str = "",
         age: int = 0,
         expression: str = "unknown",
@@ -325,9 +475,17 @@ class JobDB:
         blob = struct.pack(f"{len(embedding)}f", *embedding)
         self._conn.execute(
             "INSERT OR REPLACE INTO face_embeddings "
-            "(photo_id, face_idx, embedding, gender, age, expression) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (photo_id, face_idx, blob, gender, age, expression),
+            "(photo_id, face_idx, embedding, bbox_json, gender, age, expression) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                photo_id,
+                face_idx,
+                blob,
+                json.dumps(list(bbox) if bbox else []),
+                gender,
+                age,
+                expression,
+            ),
         )
         self._conn.commit()
 
@@ -348,11 +506,83 @@ class JobDB:
             results.append({
                 "face_idx": row["face_idx"],
                 "embedding": embedding,
+                "bbox": json.loads(row["bbox_json"] or "[]"),
                 "gender": row["gender"],
                 "age": row["age"],
                 "expression": row["expression"],
             })
         return results
+
+    def save_face_review(
+        self,
+        job_id: str,
+        photo_id: str,
+        face_idx: int,
+        bbox: list[int] | None = None,
+        crop_path: str = "",
+        label_name: str = "",
+    ) -> None:
+        """Persist face review metadata used by tagging UI."""
+        self._conn.execute(
+            """
+            INSERT INTO face_reviews
+                (job_id, photo_id, face_idx, bbox_json, crop_path, label_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, photo_id, face_idx) DO UPDATE SET
+                bbox_json = excluded.bbox_json,
+                crop_path = excluded.crop_path,
+                label_name = CASE
+                    WHEN excluded.label_name != '' THEN excluded.label_name
+                    ELSE face_reviews.label_name
+                END
+            """,
+            (
+                job_id,
+                photo_id,
+                face_idx,
+                json.dumps(bbox or []),
+                crop_path,
+                label_name,
+            ),
+        )
+        self._conn.commit()
+
+    def list_face_reviews(self, job_id: str, photo_id: str) -> list[dict]:
+        """Return per-face review metadata for one classified photo."""
+        rows = self._conn.execute(
+            "SELECT * FROM face_reviews WHERE job_id = ? AND photo_id = ? ORDER BY face_idx",
+            (job_id, photo_id),
+        ).fetchall()
+        return [
+            {
+                "job_id": row["job_id"],
+                "photo_id": row["photo_id"],
+                "face_idx": row["face_idx"],
+                "bbox": json.loads(row["bbox_json"] or "[]"),
+                "crop_path": row["crop_path"] or "",
+                "label_name": row["label_name"] or "",
+            }
+            for row in rows
+        ]
+
+    def label_face_review(
+        self,
+        job_id: str,
+        photo_id: str,
+        face_idx: int,
+        name: str,
+    ) -> None:
+        """Assign a human-readable label to a detected face."""
+        self._conn.execute(
+            """
+            INSERT INTO face_reviews (job_id, photo_id, face_idx, label_name)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_id, photo_id, face_idx) DO UPDATE SET
+                label_name = excluded.label_name
+            """,
+            (job_id, photo_id, face_idx, name),
+        )
+        self._conn.commit()
 
     @staticmethod
     def _row_to_job(row) -> Job:
