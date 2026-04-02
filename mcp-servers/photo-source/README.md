@@ -55,6 +55,7 @@ Apple Photos / iCloud 실검증은 VS Code 통합 터미널보다 `Terminal.app`
 ```bash
 ./scripts/validate_icloud_fetch_terminal.sh
 ./scripts/validate_icloud_fetch_terminal.sh 9C2B2620-2F9F-4DD2-A09E-C798CFD95161
+uv run --directory . python ./scripts/validate_icloud_fetch.py 9C2B2620-2F9F-4DD2-A09E-C798CFD95161
 ```
 
 ## 의존성 구성
