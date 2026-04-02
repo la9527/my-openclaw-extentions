@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 
 from mcp.server.fastmcp import FastMCP
@@ -27,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "photo-ranker",
-    instructions="Photo ranking and classification MCP server",
+    instructions=(
+        "Photo ranking and classification MCP server. "
+        "Supports Apple Photos / local classification, review selection, "
+        "and high-level best-photo curation workflows such as selecting the "
+        "top quality percent from the latest photos and optionally writing "
+        "them back into an Apple Photos album."
+    ),
 )
 
 # Lazy-initialized engines
@@ -343,6 +350,110 @@ async def _run_classify_job(job) -> dict:
         "ranked_count": len(ranked),
         "top_score": ranked[0].total_score if ranked else 0,
     }
+
+
+def _register_known_faces(pipe: Pipeline, db: JobDB) -> None:
+    known = db.load_known_faces()
+    for name, embeddings in known.items():
+        for emb in embeddings:
+            pipe.register_known_face(name, emb)
+
+
+async def _run_sync_classification(
+    source: str,
+    source_path: str,
+    *,
+    album: str = "",
+    person: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 100,
+) -> tuple[object | None, JobDB, list[dict]]:
+    from sources import load_photos as _load
+
+    photos = _load(
+        source,
+        source_path,
+        album=album,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    db = _get_job_db()
+    if not photos:
+        return None, db, []
+
+    pipe = _get_pipeline()
+    _register_known_faces(pipe, db)
+
+    queue = _get_job_queue()
+    job = queue.create_job(source, source_path)
+    job.status = JobStatus.RUNNING
+    job.started_at = time.time()
+    db.save_job(job)
+
+    _cache_job_review_assets(job, photos)
+    ranked = await pipe.run(photos, job)
+    _cache_face_review_assets(job, photos)
+
+    results = [result.to_dict() for result in ranked]
+    db.save_photo_results(job.id, results)
+    db.save_job(job)
+    return job, db, results
+
+
+def _finalize_sync_job(job, db: JobDB, summary: dict) -> None:
+    job.status = JobStatus.COMPLETED
+    job.finished_at = time.time()
+    job.result_summary = summary
+    db.save_job(job)
+
+
+def _select_top_quality_results(
+    results: list[dict],
+    quality_top_percent: int,
+) -> tuple[int, float, list[dict]]:
+    if not results:
+        return 0, 0.0, []
+
+    normalized_percent = max(1, min(int(quality_top_percent), 100))
+    ranked_by_quality = sorted(
+        results,
+        key=lambda item: (item.get("quality_score", 0.0), item.get("total_score", 0.0)),
+        reverse=True,
+    )
+    selected_count = max(1, math.ceil(len(ranked_by_quality) * normalized_percent / 100))
+    threshold = float(ranked_by_quality[selected_count - 1].get("quality_score", 0.0))
+    selected = [
+        item for item in results if float(item.get("quality_score", 0.0)) >= threshold
+    ]
+    return normalized_percent, threshold, selected
+
+
+def _apply_curated_selection(
+    db: JobDB,
+    job_id: str,
+    results: list[dict],
+    selected_photo_ids: set[str],
+    *,
+    quality_top_percent: int,
+    quality_min_score: float,
+) -> None:
+    selection_note = (
+        f"Auto-selected by quality_score >= {quality_min_score:.2f} "
+        f"(top {quality_top_percent}% quality policy)"
+    )
+    for result in results:
+        is_selected = result.get("photo_id", "") in selected_photo_ids
+        tags = ["auto-curated", f"quality-top-{quality_top_percent}pct"] if is_selected else []
+        db.update_photo_review(
+            job_id,
+            result.get("photo_id", ""),
+            tags=tags,
+            selected=is_selected,
+            note=selection_note if is_selected else "",
+        )
 
 
 @mcp.tool()
@@ -760,6 +871,114 @@ async def export_selected_photos(
 
 
 @mcp.tool()
+async def curate_best_photos(
+    source: str,
+    source_path: str = "",
+    target_album_name: str = "",
+    writeback_mode: str = "review",
+    folder: str = "",
+    album: str = "",
+    person: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 30,
+    quality_top_percent: int = 30,
+) -> str:
+    """최신/필터된 사진에서 잘 나온 사진만 골라 review 또는 Apple Photos 앨범에 반영합니다.
+
+    Args:
+        source: 소스 종류 — "local", "apple", "gcs"
+        source_path: local 디렉터리, apple 앨범 이름. apple 에서 비우면 최신 사진 기준으로 처리
+        target_album_name: writeback_mode="album" 일 때 대상 Apple Photos 앨범 이름
+        writeback_mode: "review" 또는 "album"
+        folder: Apple Photos 앨범 폴더 경로
+        album: Apple Photos 앨범 필터
+        person: Apple Photos 인물 필터
+        date_from: 시작 날짜 (ISO)
+        date_to: 종료 날짜 (ISO)
+        limit: 최신/필터 결과에서 처리할 최대 사진 수
+        quality_top_percent: quality_score 상위 몇 퍼센트를 잘 나온 사진으로 볼지 결정
+
+    Returns:
+        JSON with job_id, quality threshold, selected photo ids, and optional album write-back result.
+    """
+    normalized_mode = writeback_mode.strip().lower() or "review"
+    if normalized_mode not in {"review", "album"}:
+        return json.dumps({
+            "error": "Unsupported writeback_mode",
+            "allowed": ["review", "album"],
+            "received": writeback_mode,
+        }, ensure_ascii=False)
+
+    if normalized_mode == "album" and source != "apple":
+        return json.dumps({
+            "error": "Album write-back currently supports Apple Photos source only",
+            "source": source,
+            "hint": "Use writeback_mode='review' for non-Apple sources.",
+        }, ensure_ascii=False)
+
+    if normalized_mode == "album" and not target_album_name.strip():
+        return json.dumps({
+            "error": "target_album_name is required when writeback_mode='album'",
+        }, ensure_ascii=False)
+
+    job, db, results = await _run_sync_classification(
+        source,
+        source_path,
+        album=album,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    if job is None or not results:
+        return json.dumps({"error": "No photos found from source"}, ensure_ascii=False)
+
+    normalized_percent, quality_min_score, selected = _select_top_quality_results(
+        results,
+        quality_top_percent,
+    )
+    selected_photo_ids = {
+        str(item.get("photo_id", "")) for item in selected if item.get("photo_id")
+    }
+    _apply_curated_selection(
+        db,
+        job.id,
+        results,
+        selected_photo_ids,
+        quality_top_percent=normalized_percent,
+        quality_min_score=quality_min_score,
+    )
+
+    album_result: dict[str, object] | None = None
+    if normalized_mode == "album" and selected_photo_ids:
+        album_result = _get_album_writer().add_photos_to_album(
+            sorted(selected_photo_ids),
+            target_album_name,
+            folder,
+        )
+
+    summary = {
+        "job_id": job.id,
+        "source": source,
+        "source_path": source_path,
+        "ranked_count": len(results),
+        "selected_count": len(selected_photo_ids),
+        "selected_photo_ids": sorted(selected_photo_ids),
+        "quality_policy": {
+            "mode": "quality_top_percent",
+            "quality_top_percent": normalized_percent,
+            "quality_min_score": round(quality_min_score, 2),
+        },
+        "writeback_mode": normalized_mode,
+        "target_album_name": target_album_name,
+        "album_result": album_result,
+    }
+    _finalize_sync_job(job, db, summary)
+    return json.dumps(summary, ensure_ascii=False)
+
+
+@mcp.tool()
 async def list_photo_faces(job_id: str, photo_id: str) -> str:
     """검토 UI에서 사용할 얼굴 crop/bbox/속성 목록을 반환합니다."""
     db = _get_job_db()
@@ -900,10 +1119,7 @@ async def classify_and_organize(
     Returns:
         JSON with job_id, ranked_count, albums_created, photos_organized.
     """
-    from sources import load_photos as _load
-
-    # 1. Load photos from source
-    photos = _load(
+    job, db, results = await _run_sync_classification(
         source,
         source_path,
         album=album,
@@ -912,33 +1128,8 @@ async def classify_and_organize(
         date_to=date_to,
         limit=limit,
     )
-    if not photos:
+    if job is None or not results:
         return json.dumps({"error": "No photos found from source"})
-
-    # 2. Classify via pipeline
-    pipe = _get_pipeline()
-    db = _get_job_db()
-
-    # Load known faces
-    known = db.load_known_faces()
-    for name, embeddings in known.items():
-        for emb in embeddings:
-            pipe.register_known_face(name, emb)
-
-    # Create job for tracking
-    queue = _get_job_queue()
-    job = queue.create_job(source, source_path)
-    job.status = JobStatus.RUNNING
-    job.started_at = time.time()
-    db.save_job(job)
-
-    _cache_job_review_assets(job, photos)
-
-    ranked = await pipe.run(photos, job)
-    _cache_face_review_assets(job, photos)
-    results = [r.to_dict() for r in ranked]
-    db.save_photo_results(job.id, results)
-    db.save_job(job)
 
     # 3. Organize into albums
     if source == "apple" and results:
@@ -952,14 +1143,11 @@ async def classify_and_organize(
 
     summary = {
         "job_id": job.id,
-        "ranked_count": len(ranked),
-        "top_score": ranked[0].total_score if ranked else 0,
+        "ranked_count": len(results),
+        "top_score": results[0].get("total_score", 0) if results else 0,
         **album_result,
     }
-    job.status = JobStatus.COMPLETED
-    job.finished_at = time.time()
-    job.result_summary = summary
-    db.save_job(job)
+    _finalize_sync_job(job, db, summary)
 
     return json.dumps(summary)
 

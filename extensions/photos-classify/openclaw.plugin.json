@@ -41,6 +41,19 @@
         "description": "원격 review route 접근에 사용할 선택적 토큰. 비워두면 로컬 브라우저만 허용됩니다.",
         "default": ""
       },
+      "reviewAllowTailscale": {
+        "type": "boolean",
+        "description": "Tailscale Serve가 추가하는 사용자 identity header를 신뢰해 ts.net 프록시 접근을 허용합니다.",
+        "default": false
+      },
+      "reviewTailscaleUserLogins": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "허용할 Tailscale user login 목록. 비워두면 identity header가 있는 모든 tailnet 사용자 요청을 허용합니다.",
+        "default": []
+      },
       "defaultSource": {
         "type": "string",
         "enum": ["local", "apple", "google", "gcs"],

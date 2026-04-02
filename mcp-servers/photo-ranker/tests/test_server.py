@@ -317,3 +317,93 @@ class TestClassifyAndOrganizeWorkflow:
         assert job.finished_at is not None
         assert job.result_summary == parsed
         assert mock_db.save_job.call_count >= 2
+
+
+class TestCurateBestPhotos:
+    @pytest.mark.asyncio
+    async def test_curate_best_photos_marks_top_quality_percent_selected(self):
+        import server
+        from jobs import Job
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        job = Job(id="job-curate", source="apple", source_path="")
+        mock_db = MagicMock()
+        mock_db.update_photo_review.return_value = {}
+
+        results = [
+            {"photo_id": "p1", "quality_score": 95.0, "total_score": 80.0},
+            {"photo_id": "p2", "quality_score": 90.0, "total_score": 78.0},
+            {"photo_id": "p3", "quality_score": 70.0, "total_score": 76.0},
+            {"photo_id": "p4", "quality_score": 60.0, "total_score": 74.0},
+            {"photo_id": "p5", "quality_score": 50.0, "total_score": 72.0},
+            {"photo_id": "p6", "quality_score": 40.0, "total_score": 70.0},
+            {"photo_id": "p7", "quality_score": 30.0, "total_score": 68.0},
+            {"photo_id": "p8", "quality_score": 20.0, "total_score": 66.0},
+            {"photo_id": "p9", "quality_score": 10.0, "total_score": 64.0},
+            {"photo_id": "p10", "quality_score": 5.0, "total_score": 62.0},
+        ]
+
+        with patch.object(
+            server,
+            "_run_sync_classification",
+            AsyncMock(return_value=(job, mock_db, results)),
+        ):
+            result = await server.curate_best_photos(
+                source="apple",
+                limit=10,
+                quality_top_percent=30,
+                writeback_mode="review",
+            )
+
+        parsed = json.loads(result)
+        assert parsed["selected_count"] == 3
+        assert parsed["selected_photo_ids"] == ["p1", "p2", "p3"]
+        assert parsed["quality_policy"]["quality_min_score"] == 70.0
+        assert mock_db.update_photo_review.call_count == 10
+
+    @pytest.mark.asyncio
+    async def test_curate_best_photos_can_write_selected_apple_photos_to_target_album(self):
+        import server
+        from jobs import Job
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        job = Job(id="job-curate-album", source="apple", source_path="")
+        mock_db = MagicMock()
+        mock_db.update_photo_review.return_value = {}
+        mock_writer = MagicMock()
+        mock_writer.add_photos_to_album.return_value = {
+            "album": "잘나온사진1",
+            "added": 2,
+            "failed": 0,
+            "errors": [],
+        }
+
+        results = [
+            {"photo_id": "uuid-1", "quality_score": 90.0, "total_score": 88.0},
+            {"photo_id": "uuid-2", "quality_score": 85.0, "total_score": 84.0},
+            {"photo_id": "uuid-3", "quality_score": 20.0, "total_score": 40.0},
+            {"photo_id": "uuid-4", "quality_score": 10.0, "total_score": 20.0},
+            {"photo_id": "uuid-5", "quality_score": 5.0, "total_score": 10.0},
+        ]
+
+        with patch.object(
+            server,
+            "_run_sync_classification",
+            AsyncMock(return_value=(job, mock_db, results)),
+        ), patch.object(server, "_get_album_writer", return_value=mock_writer):
+            result = await server.curate_best_photos(
+                source="apple",
+                limit=5,
+                quality_top_percent=30,
+                writeback_mode="album",
+                target_album_name="잘나온사진1",
+            )
+
+        parsed = json.loads(result)
+        assert parsed["selected_photo_ids"] == ["uuid-1", "uuid-2"]
+        assert parsed["album_result"]["added"] == 2
+        mock_writer.add_photos_to_album.assert_called_once_with(
+            ["uuid-1", "uuid-2"],
+            "잘나온사진1",
+            "",
+        )

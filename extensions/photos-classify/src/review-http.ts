@@ -47,6 +47,11 @@ type ReviewAppAutoStart = {
   sleep?: (ms: number) => Promise<void>;
 };
 
+type ReviewTailscaleAccess = {
+  enabled: boolean;
+  allowedUserLogins: string[];
+};
+
 const DEFAULT_REVIEW_APP_COMMAND = "uv";
 const DEFAULT_REVIEW_APP_ARGS = ["run", "python", "review_app.py"];
 const DEFAULT_REVIEW_APP_START_TIMEOUT_MS = 5000;
@@ -57,6 +62,7 @@ export function createPhotosReviewHttpHandler(params: {
   reviewBaseUrl: string;
   reviewAccessToken?: string;
   reviewAppAutoStart?: ReviewAppAutoStart;
+  reviewTailscaleAccess?: ReviewTailscaleAccess;
   logger?: PluginLogger;
 }) {
   return async (req: RequestLike, res: ResponseLike): Promise<boolean> => {
@@ -70,7 +76,7 @@ export function createPhotosReviewHttpHandler(params: {
       return false;
     }
 
-    const access = resolveRouteAccess(req, parsed, params.reviewAccessToken);
+    const access = resolveRouteAccess(req, parsed, params.reviewAccessToken, params.reviewTailscaleAccess);
     if (!access.allowed) {
       respondHtml(
         res,
@@ -91,6 +97,7 @@ export function createPhotosReviewHttpHandler(params: {
         buildPortalHtml({
           basePath: PHOTOS_CLASSIFY_ROUTE_BASE,
           authToken: access.token,
+          accessLabel: access.accessLabel,
         }),
       );
       return true;
@@ -254,28 +261,56 @@ function resolveRouteAccess(
   req: RequestLike,
   parsedUrl: URL,
   configuredToken?: string,
-): { allowed: true; token: string } | { allowed: false; statusCode: 401 | 403; message: string } {
+  tailscaleAccess?: ReviewTailscaleAccess,
+):
+  | { allowed: true; token: string; accessLabel: "local-only" | "token" | "tailscale" }
+  | { allowed: false; statusCode: 401 | 403; message: string } {
   const requestToken = readAccessToken(req, parsedUrl);
   if (isLoopbackRequest(req)) {
-    return { allowed: true, token: requestToken };
+    return { allowed: true, token: requestToken, accessLabel: "local-only" };
+  }
+  if (isTrustedTailscaleRequest(req, tailscaleAccess)) {
+    return { allowed: true, token: requestToken, accessLabel: "tailscale" };
   }
   if (configuredToken && requestToken === configuredToken) {
-    return { allowed: true, token: requestToken };
+    return { allowed: true, token: requestToken, accessLabel: "token" };
   }
   if (configuredToken) {
     return {
       allowed: false,
       statusCode: 401,
       message:
-        "원격 접근은 token 이 필요합니다. `?token=...` query 또는 `x-photos-classify-token` 헤더로 접근하세요.",
+        "원격 접근은 token 이 필요합니다. `?token=...` query 또는 `x-photos-classify-token` 헤더로 접근하세요. Tailscale Serve를 쓴다면 `reviewAllowTailscale` 설정도 검토하세요.",
     };
   }
   return {
     allowed: false,
     statusCode: 403,
     message:
-      "이 route는 현재 로컬 브라우저 전용입니다. 원격 접근이 필요하면 `reviewAccessToken` 설정을 추가하세요.",
+      "이 route는 현재 로컬 브라우저 전용입니다. 원격 접근이 필요하면 `reviewAccessToken` 또는 `reviewAllowTailscale` 설정을 추가하세요.",
   };
+}
+
+function isTrustedTailscaleRequest(
+  req: RequestLike,
+  tailscaleAccess?: ReviewTailscaleAccess,
+): boolean {
+  if (!tailscaleAccess?.enabled) {
+    return false;
+  }
+  const remoteAddress = normalizeRemoteAddress(req.socket?.remoteAddress);
+  if (remoteAddress !== "127.0.0.1" && remoteAddress !== "::1") {
+    return false;
+  }
+  const login = readHeader(req, "tailscale-user-login");
+  const name = readHeader(req, "tailscale-user-name");
+  if (!login && !name) {
+    return false;
+  }
+  if (tailscaleAccess.allowedUserLogins.length === 0) {
+    return true;
+  }
+  return login ? tailscaleAccess.allowedUserLogins.includes(login.toLowerCase()) : false;
 }
 
 function readAccessToken(req: RequestLike, parsedUrl: URL): string {
@@ -288,6 +323,14 @@ function readAccessToken(req: RequestLike, parsedUrl: URL): string {
     return headerToken[0]?.trim() ?? "";
   }
   return typeof headerToken === "string" ? headerToken.trim() : "";
+}
+
+function readHeader(req: RequestLike, name: string): string {
+  const value = req.headers?.[name];
+  if (Array.isArray(value)) {
+    return value[0]?.trim() ?? "";
+  }
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function classifyRoute(pathname: string): ReviewRouteKind {
@@ -450,7 +493,7 @@ uv run review_app.py</pre>
 </html>`;
 }
 
-function buildPortalHtml(params: { basePath: string; authToken: string }): string {
+function buildPortalHtml(params: { basePath: string; authToken: string; accessLabel: string }): string {
   return `<!doctype html>
 <html lang="ko">
 <head>
@@ -494,7 +537,7 @@ function buildPortalHtml(params: { basePath: string; authToken: string }): strin
       </div>
       <div class="chips muted">
         <span>base route: <code>${params.basePath}</code></span>
-        <span id="access-chip">access: ${params.authToken ? "token" : "local-only"}</span>
+        <span id="access-chip">access: ${params.authToken ? "token" : params.accessLabel}</span>
       </div>
     </section>
 

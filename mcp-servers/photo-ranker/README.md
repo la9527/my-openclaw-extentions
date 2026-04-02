@@ -109,6 +109,7 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | 도구 | 설명 | 주요 파라미터 |
 |---|---|---|
 | `classify_and_organize` | 소스 → 분류 → 앨범 정리 전체 워크플로우 | `source`, `source_path`, `album_prefix?`, `limit?` |
+| `curate_best_photos` | 최신/필터된 사진에서 quality 상위 퍼센트를 고르고 review 또는 단일 앨범에 반영 | `source`, `limit?`, `quality_top_percent?`, `writeback_mode?`, `target_album_name?` |
 
 ## 점수 체계
 
@@ -191,6 +192,31 @@ http://127.0.0.1:8765/review/<job_id>
 - 얼굴 crop 확인
 - 얼굴 이름 지정 및 known face 등록
 - selected-only export 실행
+
+## 추천 호출 예시
+
+Apple Photos 최신 30장 중 quality 상위 30%만 review-selected 처리:
+
+```text
+curate_best_photos(
+  source="apple",
+  limit=30,
+  quality_top_percent=30,
+  writeback_mode="review"
+)
+```
+
+Apple Photos 최신 30장 중 quality 상위 30%만 `잘나온사진1` 앨범에 추가:
+
+```text
+curate_best_photos(
+  source="apple",
+  limit=30,
+  quality_top_percent=30,
+  writeback_mode="album",
+  target_album_name="잘나온사진1"
+)
+```
 
 ## 테스트
 

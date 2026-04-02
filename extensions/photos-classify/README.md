@@ -17,6 +17,70 @@ MCP 기반 사진 분류/랭킹/앨범 정리를 OpenClaw에서 사용하기 위
 | `/classify-status [job_id]` | 백그라운드 분류 Job 상태 조회 |
 | `/classify-review [job_id]` | review app 및 OpenClaw review route 안내 |
 
+## 채팅 입력 가이드
+
+직접 채팅에서 요청할 때는 아래 두 가지 방식이 가장 안정적이다.
+
+1. 플러그인 슬래시 명령을 직접 입력한다.
+2. 자연어로 요청하되 source, path, job_id, 원하는 동작을 같이 명시한다.
+
+권장 예시:
+
+```text
+/classify local /Users/me/Pictures/2026-03
+/classify apple "여행 사진"
+/classify-status 003d0bc1
+/classify-review 003d0bc1
+```
+
+고수준 MCP 도구를 직접 쓰는 예시:
+
+```text
+Apple Photos 최신 30장 중 잘 나온 사진만 골라 review selected 로 표시해줘.
+
+Apple Photos 최신 30장 중 잘 나온 사진만 골라서 "잘나온사진1" 앨범에 넣어줘.
+```
+
+자연어 요청 예시:
+
+```text
+local 폴더 /Users/me/Pictures/2026-03 을 photos-classify로 분류해줘.
+
+Apple Photos 앨범 "여행 사진"을 photos-classify로 분류해줘.
+
+job_id 003d0bc1 상태를 확인해줘.
+
+job_id 003d0bc1 review 링크를 열 수 있게 안내해줘.
+
+job_id 003d0bc1 에 대해 get_review_items 결과를 보여줘.
+
+job_id 003d0bc1 의 selected 사진만 /Users/me/Pictures/Selected 로 export 해줘.
+
+Apple Photos 최신 30장 중 quality 상위 30% 사진만 골라 review 대상으로 표시해줘.
+
+Apple Photos 최신 30장 중 quality 상위 30% 사진만 골라서 잘나온사진1 앨범을 만들고 추가해줘.
+```
+
+잘 되는 요청 형태:
+
+- source를 명확히 쓴다: `local`, `apple`, `google`, `gcs`
+- local이면 실제 디렉터리 경로를 함께 쓴다
+- review/상태 조회는 `job_id`를 함께 쓴다
+- export/정리는 출력 경로를 같이 쓴다
+
+피하는 것이 좋은 요청 형태:
+
+- `사진 좀 정리해줘` 처럼 source/path 없이 너무 짧은 요청
+- 어떤 앨범이나 폴더를 뜻하는지 없는 요청
+- review 대상 job_id 없이 `검토해줘` 만 보내는 요청
+
+운영 팁:
+
+- 최초 분류는 `/classify ...` 또는 `photos-classify로 분류해줘` 형태가 가장 단순하다.
+- 결과 확인은 `/classify-status <job_id>` 나 `/classify-review <job_id>` 가 가장 안정적이다.
+- review UI가 필요하면 `/plugins/photos-classify/` 포털이나 `/plugins/photos-classify/review/<job_id>` 경로를 사용한다.
+- 최신 N장 + 잘 나온 사진 선별 + 단일 앨범 write-back 은 `curate_best_photos` 도구 호출이 가장 직접적이다.
+
 ## 설치
 
 ```bash
@@ -35,6 +99,8 @@ openclaw config set plugins.photos-classify.enabled true
 | `reviewAppUrl` | `http://127.0.0.1:8765` | `review_app.py` 로컬 HTTP 주소 |
 | `reviewAppAutoStart` | `true` | review route/API 접근 시 `review_app.py` 자동 기동 |
 | `reviewAccessToken` | `` | 원격 review route 접근용 선택 토큰. 비워두면 로컬 브라우저만 허용 |
+| `reviewAllowTailscale` | `false` | Tailscale Serve identity header 를 신뢰해 `ts.net` 프록시 접근 허용 |
+| `reviewTailscaleUserLogins` | `[]` | 허용할 Tailscale login allowlist. 비워두면 tailnet 인증 사용자 전체 허용 |
 | `defaultSource` | `apple` | 기본 사진 소스 (`local`, `apple`, `google`, `gcs`) |
 
 ## Review Route
@@ -58,6 +124,21 @@ uv run python review_app.py
 - `/plugins/photos-classify/`
 - `/plugins/photos-classify/review/<job_id>`
 
+Tailscale Serve 경유 접근이 필요하면 아래처럼 설정한다.
+
+```bash
+openclaw config set plugins.entries.photos-classify.config.reviewAllowTailscale true
+openclaw config set plugins.entries.photos-classify.config.reviewTailscaleUserLogins '["your-login@example.com"]'
+openclaw gateway restart
+```
+
+운영 메모:
+
+- plugin 은 backend 요청이 loopback 에서 들어오고 `Tailscale-User-Login` 또는 `Tailscale-User-Name` header 가 있을 때만 Tailscale 요청으로 신뢰한다.
+- `reviewTailscaleUserLogins` 를 비워두면 tailnet 인증이 끝난 모든 사용자 요청을 허용한다.
+- 더 좁게 열고 싶으면 allowlist 를 반드시 채운다.
+- Tailscale Serve 와 token 접근을 같이 써도 된다.
+
 ## 운영 절차
 
 글로벌 설치된 `openclaw` 기준 권장 순서:
@@ -67,6 +148,7 @@ uv run python review_app.py
 3. `http://127.0.0.1:18789/plugins/photos-classify/` 에서 recent jobs 포털이 열리는지 확인한다.
 4. review app 이 내려가 있는 상태에서 `http://127.0.0.1:18789/plugins/photos-classify/review/<job_id>` 를 열어 auto-start 가 동작하는지 확인한다.
 5. 필요하면 `http://127.0.0.1:18789/plugins/photos-classify/api/jobs/<job_id>/items` 로 review API 응답까지 확인한다.
+6. Tailscale Serve 를 쓰는 경우 `https://byoungyoung-macmini.tail53bcc7.ts.net/plugins/photos-classify/` 와 review URL 에서 동일하게 열리는지 확인한다.
 
 검증에 유용한 명령:
 
@@ -182,6 +264,8 @@ openclaw agent --session-id photos-classify-check --message "/classify-review <j
 - 기본값은 프록시 헤더가 없는 로컬 브라우저 요청만 허용한다.
 - 기본값은 review route/API 접근 시 `review_app.py` 자동 기동을 시도한다.
 - `reviewAccessToken` 을 설정하면 `?token=...` 또는 `x-photos-classify-token` 헤더로 원격 접근을 허용할 수 있다.
+- `reviewAllowTailscale=true` 이면 Tailscale Serve identity header 가 있는 `ts.net` 프록시 요청을 허용할 수 있다.
+- `reviewTailscaleUserLogins` 를 채우면 허용 대상 Tailscale 로그인만 통과시킨다.
 - `/plugins/photos-classify/` 포털에서 recent jobs 와 review 링크를 볼 수 있다.
 - auto-start 가 실패하면 `photoRankerDir` 경로와 `uv` 실행 가능 여부를 먼저 확인한다.
 

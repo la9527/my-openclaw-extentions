@@ -222,4 +222,64 @@ describe("createPhotosReviewHttpHandler", () => {
     const firstCall = fetchMock.mock.calls[0];
     expect(String(firstCall?.[0])).toContain("auth_token=secret-token");
   });
+
+  it("allows Tailscale Serve requests when identity headers are present and access is enabled", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("<html>ok</html>", { status: 200 })) as FetchSpy;
+    const handler = createPhotosReviewHttpHandler({
+      reviewBaseUrl: "http://127.0.0.1:8765",
+      reviewTailscaleAccess: {
+        enabled: true,
+        allowedUserLogins: [],
+      },
+    });
+    const res = createResponse();
+
+    const handled = await handler(
+      createRequest({
+        url: `${PHOTOS_CLASSIFY_ROUTE_BASE}/review/job-42`,
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-forwarded-for": "100.64.0.10",
+          "tailscale-user-login": "user@example.com",
+          "tailscale-user-name": "Example User",
+        },
+      }) as never,
+      res as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(fetchMock).toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("blocks Tailscale Serve requests when the login is not allowlisted", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const handler = createPhotosReviewHttpHandler({
+      reviewBaseUrl: "http://127.0.0.1:8765",
+      reviewTailscaleAccess: {
+        enabled: true,
+        allowedUserLogins: ["allowed@example.com"],
+      },
+    });
+    const res = createResponse();
+
+    const handled = await handler(
+      createRequest({
+        url: `${PHOTOS_CLASSIFY_ROUTE_BASE}/review/job-42`,
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-forwarded-for": "100.64.0.10",
+          "tailscale-user-login": "blocked@example.com",
+          "tailscale-user-name": "Blocked User",
+        },
+      }) as never,
+      res as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+  });
 });

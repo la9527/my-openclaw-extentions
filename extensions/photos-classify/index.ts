@@ -29,6 +29,8 @@ interface PhotosClassifyConfig {
   reviewAppUrl: string;
   reviewAppAutoStart: boolean;
   reviewAccessToken: string;
+  reviewAllowTailscale: boolean;
+  reviewTailscaleUserLogins: string[];
   defaultSource: "local" | "apple" | "google" | "gcs";
 }
 
@@ -38,8 +40,26 @@ const DEFAULTS: PhotosClassifyConfig = {
   reviewAppUrl: "http://127.0.0.1:8765",
   reviewAppAutoStart: true,
   reviewAccessToken: "",
+  reviewAllowTailscale: false,
+  reviewTailscaleUserLogins: [],
   defaultSource: "apple",
 };
+
+function parseTailscaleUserLogins(rawValue: unknown): string[] {
+  if (typeof rawValue === "string") {
+    return rawValue
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return [];
+}
 
 function resolveConfig(raw: Record<string, unknown>): PhotosClassifyConfig {
   return {
@@ -54,6 +74,11 @@ function resolveConfig(raw: Record<string, unknown>): PhotosClassifyConfig {
         : DEFAULTS.reviewAppAutoStart,
     reviewAccessToken:
       (raw.reviewAccessToken as string) || DEFAULTS.reviewAccessToken,
+    reviewAllowTailscale:
+      typeof raw.reviewAllowTailscale === "boolean"
+        ? raw.reviewAllowTailscale
+        : DEFAULTS.reviewAllowTailscale,
+    reviewTailscaleUserLogins: parseTailscaleUserLogins(raw.reviewTailscaleUserLogins),
     defaultSource:
       (raw.defaultSource as PhotosClassifyConfig["defaultSource"]) ||
       DEFAULTS.defaultSource,
@@ -85,6 +110,10 @@ export default definePluginEntry({
           cwd: config.photoRankerDir,
         },
         reviewAccessToken: config.reviewAccessToken,
+        reviewTailscaleAccess: {
+          enabled: config.reviewAllowTailscale,
+          allowedUserLogins: config.reviewTailscaleUserLogins,
+        },
         logger: api.logger,
       }) as (req: unknown, res: unknown) => Promise<boolean>,
     });
@@ -118,6 +147,7 @@ export default definePluginEntry({
               "",
               "MCP 도구를 직접 사용하려면:",
               "- `classify_and_organize` — E2E 워크플로우",
+              "- `curate_best_photos` — 최신 N장 기준 상위 quality 퍼센트 선별 + review/album 반영",
               "- `start_classify_job` — 백그라운드 Job 실행",
               "- `score_quality` — 단일 사진 품질 분석",
               "- `describe_scene` — VLM 장면 묘사",
@@ -190,6 +220,7 @@ export default definePluginEntry({
               "- `export_selected_photos` — selected=true 사진만 내보내기",
               "- `organize_results_to_directory` — 로컬 결과 디렉터리 정리",
               `- review route 접근 시 review app auto-start=${config.reviewAppAutoStart ? "on" : "off"}`,
+              `- tailscale access=${config.reviewAllowTailscale ? "on" : "off"}`,
               "- auto-start 실패 시 `photoRankerDir` 설정과 uv 환경을 확인",
             ].join("\n"),
           };
@@ -202,6 +233,7 @@ export default definePluginEntry({
             `리뷰 UI(OpenClaw route): ${PHOTOS_CLASSIFY_ROUTE_BASE}/review/${jobId}`,
             `로컬 review app: ${config.reviewAppUrl}/review/${jobId}`,
             `auto-start: ${config.reviewAppAutoStart ? "enabled" : "disabled"}`,
+            `tailscale access: ${config.reviewAllowTailscale ? "enabled" : "disabled"}`,
             `\`get_review_items(job_id="${jobId}")\``,
             `\`list_photo_faces(job_id="${jobId}", photo_id="...")\``,
             `\`set_photo_review(job_id="${jobId}", photo_id="...", tags_json='["selected"]', selected=true)\``,
@@ -213,7 +245,7 @@ export default definePluginEntry({
     });
 
     api.logger.info?.(
-      `photos-classify: registered with source=${config.defaultSource}, reviewRoute=${PHOTOS_CLASSIFY_ROUTE_BASE}, autoStart=${config.reviewAppAutoStart ? "on" : "off"}, remoteAccess=${config.reviewAccessToken ? "token" : "loopback"}`,
+      `photos-classify: registered with source=${config.defaultSource}, reviewRoute=${PHOTOS_CLASSIFY_ROUTE_BASE}, autoStart=${config.reviewAppAutoStart ? "on" : "off"}, remoteAccess=${config.reviewAccessToken ? "token" : config.reviewAllowTailscale ? "tailscale" : "loopback"}`,
     );
   },
 });
