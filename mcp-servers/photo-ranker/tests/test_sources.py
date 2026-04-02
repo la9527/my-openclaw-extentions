@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from PIL import Image
 
@@ -110,6 +111,7 @@ class TestLoadApple(unittest.TestCase):
         p = MagicMock()
         p.uuid = uuid
         p.filename = filename
+        p.original_filename = filename
         p.path = path
         p.date = datetime(2026, 3, 15, 10, 0)
         p.album_info = []
@@ -132,6 +134,9 @@ class TestLoadApple(unittest.TestCase):
         mock_db = MagicMock()
         mock_db.photos.return_value = mock_photos
         mock_module.PhotosDB.return_value = mock_db
+        mock_exporter = MagicMock()
+        mock_module.PhotoExporter.return_value = mock_exporter
+        mock_module.ExportOptions = MagicMock()
         return patch.dict("sys.modules", {"osxphotos": mock_module})
 
     def test_loads_apple_photos(self):
@@ -213,9 +218,13 @@ class TestLoadApple(unittest.TestCase):
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_no_path_skipped(self):
-        """Photos without a file path should be skipped."""
+    def test_missing_photo_downloaded_from_icloud(self):
+        """Photos without a local path should be fetched via osxphotos export."""
         import importlib
+
+        tmpdir = tempfile.mkdtemp()
+        downloaded = Path(tmpdir) / "icloud.jpg"
+        downloaded.write_bytes(_make_test_image())
 
         no_path = self._make_mock_photo("u1", "a.jpg", None)
         no_path.path = None
@@ -223,9 +232,58 @@ class TestLoadApple(unittest.TestCase):
         with self._patch_osxphotos([no_path]):
             import sources
             importlib.reload(sources)
+            mock_osxphotos = sys.modules["osxphotos"]
+            mock_osxphotos.PhotoExporter.return_value.export.return_value = MagicMock(
+                exported=[str(downloaded)]
+            )
             photos = sources.load_photos("apple", "", limit=10)
 
-        assert len(photos) == 0
+        assert len(photos) == 1
+        assert photos[0]["source_photo_path"] == str(downloaded)
+
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_missing_photo_falls_back_to_photokit(self):
+        """Fallback should use PhotoKit when AppleScript export returns no files."""
+        import importlib
+
+        tmpdir = tempfile.mkdtemp()
+        downloaded = Path(tmpdir) / "icloud.jpg"
+        downloaded.write_bytes(_make_test_image())
+
+        no_path = self._make_mock_photo("u1", "a.jpg", None)
+        no_path.path = None
+
+        with self._patch_osxphotos([no_path]):
+            old_photokit = sys.modules.get("osxphotos.photokit")
+            sys.modules["osxphotos.photokit"] = MagicMock()
+            try:
+                import sources
+                importlib.reload(sources)
+                mock_osxphotos = sys.modules["osxphotos"]
+                mock_osxphotos.PhotoExporter.return_value.export.side_effect = [
+                    MagicMock(exported=[]),
+                    MagicMock(exported=[str(downloaded)]),
+                ]
+                photos = sources.load_photos("apple", "", limit=10)
+            finally:
+                if old_photokit is None:
+                    del sys.modules["osxphotos.photokit"]
+                else:
+                    sys.modules["osxphotos.photokit"] = old_photokit
+
+        assert len(photos) == 1
+        assert photos[0]["source_photo_path"] == str(downloaded)
+        assert mock_osxphotos.ExportOptions.call_args_list == [
+            call(download_missing=True),
+            call(download_missing=True, use_photokit=True),
+        ]
+
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestLoadUnsupported(unittest.TestCase):

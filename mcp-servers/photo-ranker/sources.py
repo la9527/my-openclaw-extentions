@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import tempfile
 from pathlib import Path
 
 try:
@@ -21,6 +22,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
+_APPLE_DOWNLOAD_CACHE_DIR: Path | None = None
+_APPLE_DOWNLOADED_PATHS: dict[str, str] = {}
+_APPLE_PHOTOKIT_DISABLED = False
 
 
 def load_photos(
@@ -164,16 +168,17 @@ def _load_apple(
 
     results: list[dict] = []
     for p in photos:
-        if not p.path:
+        source_path = _resolve_apple_photo_path(p, download_missing=True)
+        if not source_path:
             continue
         try:
-            img = Image.open(p.path)
+            img = Image.open(source_path)
             b64 = _image_to_b64(img, max_size)
             results.append(
                 {
                     "photo_id": p.uuid,
                     "image_b64": b64,
-                    "source_photo_path": p.path,
+                    "source_photo_path": source_path,
                 }
             )
         except Exception:
@@ -200,3 +205,126 @@ def _image_to_b64(img, max_size: int = 512) -> str:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def _get_apple_cache_dir() -> Path:
+    global _APPLE_DOWNLOAD_CACHE_DIR
+    if _APPLE_DOWNLOAD_CACHE_DIR is None:
+        _APPLE_DOWNLOAD_CACHE_DIR = Path(
+            tempfile.mkdtemp(prefix="photo-ranker-apple-cache-")
+        )
+    return _APPLE_DOWNLOAD_CACHE_DIR
+
+
+def _preferred_apple_filename(photo) -> str | None:
+    for attr in ("original_filename", "filename"):
+        value = getattr(photo, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _pick_cached_apple_export(photo_id: str) -> str | None:
+    cached_path = _APPLE_DOWNLOADED_PATHS.get(photo_id)
+    if cached_path:
+        return cached_path
+
+    cache_dir = _get_apple_cache_dir() / photo_id
+    if not cache_dir.is_dir():
+        return None
+
+    for candidate in sorted(cache_dir.iterdir()):
+        if candidate.is_file() and candidate.suffix.lower() not in {".aae", ".json", ".xmp"}:
+            _APPLE_DOWNLOADED_PATHS[photo_id] = str(candidate)
+            return str(candidate)
+
+    return None
+
+
+def _apple_export_strategies() -> list[tuple[str, dict[str, bool]]]:
+    strategies: list[tuple[str, dict[str, bool]]] = [
+        ("download_missing", {"download_missing": True}),
+    ]
+    if not _APPLE_PHOTOKIT_DISABLED:
+        strategies.append(
+            (
+                "download_missing_photokit",
+                {"download_missing": True, "use_photokit": True},
+            )
+        )
+    return strategies
+
+
+def _is_photokit_auth_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "auth_status" in message or "authorization" in message
+
+
+def _download_missing_apple_photo(photo) -> str | None:
+    global _APPLE_PHOTOKIT_DISABLED
+
+    try:
+        import osxphotos
+    except ImportError:
+        return None
+
+    cache_dir = _get_apple_cache_dir() / photo.uuid
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for strategy_name, option_kwargs in _apple_export_strategies():
+        try:
+            export_results = osxphotos.PhotoExporter(photo).export(
+                cache_dir,
+                filename=_preferred_apple_filename(photo),
+                options=osxphotos.ExportOptions(**option_kwargs),
+            )
+        except Exception as exc:
+            if strategy_name.endswith("_photokit") and _is_photokit_auth_error(exc):
+                _APPLE_PHOTOKIT_DISABLED = True
+                logger.warning(
+                    "PhotoKit export is not authorized for this process. "
+                    "Grant Photos access in System Settings > Privacy & Security > Photos."
+                )
+            logger.warning(
+                "Failed to download Apple photo from iCloud via %s: %s (%s)",
+                strategy_name,
+                photo.uuid,
+                exc,
+            )
+            continue
+
+        exported_files = getattr(export_results, "exported", None) or []
+        for exported_file in exported_files:
+            exported_path = Path(exported_file)
+            if exported_path.is_file():
+                _APPLE_DOWNLOADED_PATHS[photo.uuid] = str(exported_path)
+                logger.info(
+                    "Downloaded Apple photo %s to %s via %s",
+                    photo.uuid,
+                    exported_path,
+                    strategy_name,
+                )
+                return str(exported_path)
+
+        logger.warning(
+            "Apple photo export returned no files via %s: %s",
+            strategy_name,
+            photo.uuid,
+        )
+
+    return _pick_cached_apple_export(photo.uuid)
+
+
+def _resolve_apple_photo_path(photo, *, download_missing: bool) -> str | None:
+    path = getattr(photo, "path", None)
+    if isinstance(path, str) and path:
+        return path
+
+    cached_path = _pick_cached_apple_export(photo.uuid)
+    if cached_path:
+        return cached_path
+
+    if not download_missing:
+        return None
+
+    return _download_missing_apple_photo(photo)

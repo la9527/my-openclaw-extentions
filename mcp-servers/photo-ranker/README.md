@@ -13,6 +13,7 @@ VLM(Vision Language Model), CLIP 기반 미적 평가, 얼굴 인식, 중복 감
 - **LAION Aesthetic** — sigmoid 매핑으로 3-7 구간 변별력 확대
 - **베스트 샷 랭킹** — 다차원 점수를 종합하여 최고의 사진 선별
 - **Apple Photos 연동** — osxphotos 읽기 + photoscript 앨범 쓰기
+- **iCloud 원본 자동 확보** — Apple Photos에서 로컬에 없는 사진도 분류 시점에 자동 export로 확보
 - **백그라운드 Job 시스템** — 대량 분류 작업을 비동기 Job으로 관리
 - **SQLite 영속성** — Job 상태와 분류 결과를 DB에 저장
 - **검토 WebUI** — preview, 얼굴 crop, selected/tag/note 편집용 로컬 리뷰 UI
@@ -217,6 +218,14 @@ curate_best_photos(
   target_album_name="잘나온사진1"
 )
 ```
+
+## Apple Photos iCloud 처리 방식
+
+- Apple Photos 자산에 로컬 원본 경로가 있으면 그 파일을 바로 사용한다.
+- 로컬 원본이 없고 iCloud에만 있는 경우, 분류 시점에 osxphotos의 missing export 경로로 임시 파일을 자동 확보한다.
+- 이 동작은 첫 접근 시 느릴 수 있으며, 인터넷 연결과 Photos 접근 권한이 필요하다.
+- 확보된 임시 파일 경로는 해당 작업의 `source_photo_path`로 저장되어 review/export 후속 흐름에서도 재사용된다.
+- VS Code 통합 터미널에서 Photos 권한이 붙지 않는 경우가 있어, 실 iCloud fetch 검증은 `Terminal.app` 에서 `./scripts/validate_icloud_fetch_terminal.sh [UUID]` 로 실행하는 편이 안정적이다.
 
 ## 테스트
 

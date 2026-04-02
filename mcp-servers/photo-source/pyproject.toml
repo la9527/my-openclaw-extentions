@@ -11,7 +11,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-apple = ["osxphotos>=0.68"]
+apple = [
+    "osxphotos>=0.68",
+    "pyobjc-core>=12.1; sys_platform == 'darwin' and platform_release >= '22.0'",
+    "pyobjc-framework-cocoa>=12.1; sys_platform == 'darwin' and platform_release >= '22.0'",
+    "pyobjc-framework-coreaudio>=12.1; sys_platform == 'darwin' and platform_release >= '22.0'",
+    "pyobjc-framework-coremedia>=12.1; sys_platform == 'darwin' and platform_release >= '22.0'",
+    "pyobjc-framework-quartz>=12.1; sys_platform == 'darwin' and platform_release >= '22.0'",
+]
 gcs = ["google-cloud-storage>=2.14"]
 google = [
     "google-api-python-client>=2.100",
