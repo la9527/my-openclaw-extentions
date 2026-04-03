@@ -25,11 +25,17 @@ class TestJobProgress:
 
 class TestJob:
     def test_to_dict(self):
-        j = Job(id="j1", source="local", source_path="/tmp")
+        j = Job(
+            id="j1",
+            source="local",
+            source_path="/tmp",
+            request_options={"selection_profile": "person"},
+        )
         d = j.to_dict()
         assert d["id"] == "j1"
         assert d["status"] == "pending"
         assert d["progress"]["total"] == 0
+        assert d["request_options"]["selection_profile"] == "person"
 
 
 class TestJobQueue:

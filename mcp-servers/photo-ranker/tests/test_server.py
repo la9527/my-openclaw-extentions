@@ -60,6 +60,14 @@ class TestRankBestShotsLogic:
         assert parsed[0]["photo_id"] == "p1"
         assert "total_score" in parsed[0]
 
+    @pytest.mark.asyncio
+    async def test_rank_best_shots_rejects_invalid_profile(self):
+        import server
+
+        result = await server.rank_best_shots("[]", selection_profile="invalid")
+        parsed = json.loads(result)
+        assert parsed["error"] == "Unsupported selection_profile"
+
 
 class TestToolRegistration:
     """Verify FastMCP server has expected tools (import-only check)."""
@@ -307,6 +315,7 @@ class TestClassifyAndOrganizeWorkflow:
                 source="local",
                 source_path="/photos",
                 limit=1,
+                selection_profile="person",
             )
 
         parsed = json.loads(result)
@@ -316,6 +325,7 @@ class TestClassifyAndOrganizeWorkflow:
         assert job.started_at is not None
         assert job.finished_at is not None
         assert job.result_summary == parsed
+        assert job.request_options["selection_profile"] == "person"
         assert mock_db.save_job.call_count >= 2
 
 
@@ -360,6 +370,93 @@ class TestCurateBestPhotos:
         assert parsed["selected_photo_ids"] == ["p1", "p2", "p3"]
         assert parsed["quality_policy"]["quality_min_score"] == 70.0
         assert mock_db.update_photo_review.call_count == 10
+
+    @pytest.mark.asyncio
+    async def test_curate_best_photos_uses_profile_score_for_landscape(self):
+        import server
+        from jobs import Job
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        job = Job(id="job-curate-landscape", source="apple", source_path="")
+        mock_db = MagicMock()
+        mock_db.update_photo_review.return_value = {}
+
+        results = [
+            {"photo_id": "portrait", "quality_score": 90.0, "total_score": 70.0},
+            {"photo_id": "view", "quality_score": 70.0, "total_score": 88.0},
+        ]
+
+        with patch.object(
+            server,
+            "_run_sync_classification",
+            AsyncMock(return_value=(job, mock_db, results)),
+        ):
+            result = await server.curate_best_photos(
+                source="apple",
+                limit=2,
+                quality_top_percent=50,
+                selection_profile="landscape",
+                writeback_mode="review",
+            )
+
+        parsed = json.loads(result)
+        assert parsed["selected_photo_ids"] == ["view"]
+        assert parsed["selection_policy"]["score_field"] == "total_score"
+
+    @pytest.mark.asyncio
+    async def test_start_classify_job_persists_selection_profile(self):
+        import server
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_job = MagicMock(id="job-123", status=MagicMock(value="pending"))
+        mock_queue = MagicMock()
+        mock_queue.create_job.return_value = mock_job
+        mock_queue.submit = AsyncMock(return_value=None)
+        mock_db = MagicMock()
+
+        with patch.object(server, "_get_job_queue", return_value=mock_queue), patch.object(
+            server,
+            "_get_job_db",
+            return_value=mock_db,
+        ):
+            result = await server.start_classify_job(
+                source="apple",
+                source_path="앨범",
+                selection_profile="landscape",
+            )
+
+        parsed = json.loads(result)
+        assert parsed["job_id"] == "job-123"
+        assert mock_job.request_options["selection_profile"] == "landscape"
+
+    @pytest.mark.asyncio
+    async def test_get_job_summary_merges_status_and_selection_profile(self):
+        import server
+        from jobs import Job, JobProgress, JobStatus
+        from unittest.mock import MagicMock, patch
+
+        job = Job(
+            id="job-summary",
+            source="apple",
+            source_path="recent",
+            request_options={"selection_profile": "person"},
+            status=JobStatus.RUNNING,
+            progress=JobProgress(total=10, completed=4, stage="vlm"),
+        )
+        mock_db = MagicMock()
+        mock_db.load_job.return_value = job
+        mock_db.load_photo_results.return_value = [{"photo_id": "p1"}, {"photo_id": "p2"}]
+        mock_db.list_job_assets.return_value = {
+            "p1": {"selected": True, "preview_path": "/tmp/p1.jpg"},
+            "p2": {"selected": False, "preview_path": ""},
+        }
+
+        with patch.object(server, "_get_job_db", return_value=mock_db):
+            result = await server.get_job_summary("job-summary")
+
+        parsed = json.loads(result)
+        assert parsed["request_options"]["selection_profile"] == "person"
+        assert parsed["selected_count"] == 1
 
     @pytest.mark.asyncio
     async def test_curate_best_photos_can_write_selected_apple_photos_to_target_album(self):

@@ -35,6 +35,7 @@ class TestReviewApp:
             id="job1",
             source="local",
             source_path="/photos",
+            request_options={"selection_profile": "landscape"},
             status=JobStatus.COMPLETED,
             progress=JobProgress(total=10, completed=10, stage="done"),
         )
@@ -68,6 +69,38 @@ class TestReviewApp:
         assert payload[0]["photo_count"] == 2
         assert payload[0]["selected_count"] == 1
         assert payload[0]["preview_path"] == "/tmp/a.jpg"
+        assert payload[0]["request_options"]["selection_profile"] == "landscape"
+
+    def test_single_job_endpoint(self, monkeypatch):
+        job = Job(
+            id="job2",
+            source="apple",
+            source_path="recent",
+            request_options={"selection_profile": "person"},
+            status=JobStatus.RUNNING,
+            progress=JobProgress(total=20, completed=5, stage="vlm"),
+        )
+
+        class DummyDB:
+            def list_jobs(self, status=None):
+                assert status is None
+                return [job]
+
+            def load_photo_results(self, job_id):
+                return []
+
+            def list_job_assets(self, job_id):
+                return {}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(review_app, "_get_db", lambda: DummyDB())
+
+        client = TestClient(review_app.app)
+        response = client.get("/api/jobs/job2")
+        assert response.status_code == 200
+        assert response.json()["request_options"]["selection_profile"] == "person"
 
     def test_review_page(self):
         client = TestClient(review_app.app)

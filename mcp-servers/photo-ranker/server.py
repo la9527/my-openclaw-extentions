@@ -21,7 +21,10 @@ from scoring import (
     compute_family_score,
     compute_quality_score,
     compute_uniqueness_score,
+    is_valid_selection_profile,
+    normalize_selection_profile,
     rank_photos,
+    SELECTION_PROFILES,
 )
 
 logger = logging.getLogger(__name__)
@@ -252,7 +255,9 @@ async def delete_known_face(name: str) -> str:
 
 @mcp.tool()
 async def rank_best_shots(
-    photo_scores_json: str, top_n: int = 10
+    photo_scores_json: str,
+    top_n: int = 10,
+    selection_profile: str = "general",
 ) -> str:
     """Rank photos by composite score and return the top N.
 
@@ -262,12 +267,16 @@ async def rank_best_shots(
             uniqueness_score, scene_description, event_type,
             faces_detected, known_persons.
         top_n: Number of top photos to return (default 10).
+        selection_profile: Ranking profile — "general", "person", "landscape"
 
     Returns:
         JSON array of ranked photos with total_score.
     """
+    if not is_valid_selection_profile(selection_profile):
+        return _selection_profile_error(selection_profile)
+
     photo_scores = json.loads(photo_scores_json)
-    ranked = rank_photos(photo_scores, top_n)
+    ranked = rank_photos(photo_scores, top_n, selection_profile=selection_profile)
     return json.dumps([r.to_dict() for r in ranked])
 
 
@@ -304,6 +313,38 @@ def _get_pipeline() -> Pipeline:
     return _pipeline
 
 
+def _build_request_options(
+    *,
+    selection_profile: str,
+    album: str = "",
+    person: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 100,
+) -> dict[str, object]:
+    return {
+        "selection_profile": normalize_selection_profile(selection_profile),
+        "filters": {
+            "album": album,
+            "person": person,
+            "date_from": date_from,
+            "date_to": date_to,
+            "limit": limit,
+        },
+    }
+
+
+def _selection_profile_error(selection_profile: str) -> str:
+    return json.dumps(
+        {
+            "error": "Unsupported selection_profile",
+            "allowed": list(SELECTION_PROFILES),
+            "received": selection_profile,
+        },
+        ensure_ascii=False,
+    )
+
+
 async def _run_classify_job(job) -> dict:
     """Handler called by JobQueue to execute classification."""
     from sources import load_photos
@@ -321,6 +362,9 @@ async def _run_classify_job(job) -> dict:
 
     # Load photos from source
     filters = getattr(job, "_filters", {})
+    selection_profile = normalize_selection_profile(
+        getattr(job, "request_options", {}).get("selection_profile", "general")
+    )
     photos = load_photos(
         job.source,
         job.source_path,
@@ -338,7 +382,7 @@ async def _run_classify_job(job) -> dict:
         db.save_job(job)
         return {"ranked_count": 0, "top_score": 0}
 
-    ranked = await pipe.run(photos, job)
+    ranked = await pipe.run(photos, job, selection_profile=selection_profile)
     _cache_face_review_assets(job, photos)
 
     # Persist results
@@ -349,6 +393,7 @@ async def _run_classify_job(job) -> dict:
     return {
         "ranked_count": len(ranked),
         "top_score": ranked[0].total_score if ranked else 0,
+        "selection_profile": selection_profile,
     }
 
 
@@ -368,6 +413,7 @@ async def _run_sync_classification(
     date_from: str = "",
     date_to: str = "",
     limit: int = 100,
+    selection_profile: str = "general",
 ) -> tuple[object | None, JobDB, list[dict]]:
     from sources import load_photos as _load
 
@@ -389,12 +435,20 @@ async def _run_sync_classification(
 
     queue = _get_job_queue()
     job = queue.create_job(source, source_path)
+    job.request_options = _build_request_options(
+        selection_profile=selection_profile,
+        album=album,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
     job.status = JobStatus.RUNNING
     job.started_at = time.time()
     db.save_job(job)
 
     _cache_job_review_assets(job, photos)
-    ranked = await pipe.run(photos, job)
+    ranked = await pipe.run(photos, job, selection_profile=selection_profile)
     _cache_face_review_assets(job, photos)
 
     results = [result.to_dict() for result in ranked]
@@ -413,6 +467,7 @@ def _finalize_sync_job(job, db: JobDB, summary: dict) -> None:
 def _select_top_quality_results(
     results: list[dict],
     quality_top_percent: int,
+    score_field: str = "quality_score",
 ) -> tuple[int, float, list[dict]]:
     if not results:
         return 0, 0.0, []
@@ -420,13 +475,13 @@ def _select_top_quality_results(
     normalized_percent = max(1, min(int(quality_top_percent), 100))
     ranked_by_quality = sorted(
         results,
-        key=lambda item: (item.get("quality_score", 0.0), item.get("total_score", 0.0)),
+        key=lambda item: (item.get(score_field, 0.0), item.get("total_score", 0.0)),
         reverse=True,
     )
     selected_count = max(1, math.ceil(len(ranked_by_quality) * normalized_percent / 100))
-    threshold = float(ranked_by_quality[selected_count - 1].get("quality_score", 0.0))
+    threshold = float(ranked_by_quality[selected_count - 1].get(score_field, 0.0))
     selected = [
-        item for item in results if float(item.get("quality_score", 0.0)) >= threshold
+        item for item in results if float(item.get(score_field, 0.0)) >= threshold
     ]
     return normalized_percent, threshold, selected
 
@@ -439,14 +494,20 @@ def _apply_curated_selection(
     *,
     quality_top_percent: int,
     quality_min_score: float,
+    selection_profile: str,
+    score_field: str,
 ) -> None:
     selection_note = (
-        f"Auto-selected by quality_score >= {quality_min_score:.2f} "
-        f"(top {quality_top_percent}% quality policy)"
+        f"Auto-selected by {score_field} >= {quality_min_score:.2f} "
+        f"(top {quality_top_percent}% selection, profile={selection_profile})"
     )
     for result in results:
         is_selected = result.get("photo_id", "") in selected_photo_ids
-        tags = ["auto-curated", f"quality-top-{quality_top_percent}pct"] if is_selected else []
+        tags = [
+            "auto-curated",
+            f"top-{quality_top_percent}pct",
+            f"profile-{selection_profile}",
+        ] if is_selected else []
         db.update_photo_review(
             job_id,
             result.get("photo_id", ""),
@@ -465,6 +526,7 @@ async def start_classify_job(
     date_from: str = "",
     date_to: str = "",
     limit: int = 100,
+    selection_profile: str = "general",
 ) -> str:
     """Start a background photo classification job.
 
@@ -476,10 +538,14 @@ async def start_classify_job(
         date_from: Start date filter (ISO format, optional)
         date_to: End date filter (ISO format, optional)
         limit: Maximum number of photos to process
+        selection_profile: Ranking profile — "general", "person", "landscape"
 
     Returns:
         JSON with job_id and status.
     """
+    if not is_valid_selection_profile(selection_profile):
+        return _selection_profile_error(selection_profile)
+
     queue = _get_job_queue()
     job = queue.create_job(source, source_path)
     job._filters = {
@@ -489,6 +555,14 @@ async def start_classify_job(
         "date_to": date_to,
         "limit": limit,
     }
+    job.request_options = _build_request_options(
+        selection_profile=selection_profile,
+        album=album,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
 
     db = _get_job_db()
     db.save_job(job)
@@ -516,6 +590,45 @@ async def get_job_status(job_id: str) -> str:
     if not job:
         return json.dumps({"error": f"Job {job_id} not found"})
     return json.dumps(job.to_dict())
+
+
+@mcp.tool()
+async def get_job_summary(job_id: str) -> str:
+    """Get job status plus review summary fields for UI/chat consumption."""
+    db = _get_job_db()
+    job = db.load_job(job_id)
+    if not job:
+        queue = _get_job_queue()
+        job = queue.get_job(job_id)
+    if not job:
+        return json.dumps({"error": f"Job {job_id} not found"})
+
+    results = db.load_photo_results(job.id)
+    assets = db.list_job_assets(job.id)
+    selected_count = sum(1 for asset in assets.values() if asset.get("selected"))
+    preview_path = next(
+        (asset.get("preview_path", "") for asset in assets.values() if asset.get("preview_path")),
+        "",
+    )
+    return json.dumps(
+        {
+            "job_id": job.id,
+            "source": job.source,
+            "source_path": job.source_path,
+            "request_options": job.request_options,
+            "status": job.status.value,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "progress": job.progress.to_dict(),
+            "result_summary": job.result_summary,
+            "error_message": job.error_message,
+            "photo_count": len(results),
+            "selected_count": selected_count,
+            "preview_path": preview_path,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -883,6 +996,7 @@ async def curate_best_photos(
     date_to: str = "",
     limit: int = 30,
     quality_top_percent: int = 30,
+    selection_profile: str = "general",
 ) -> str:
     """최신/필터된 사진에서 잘 나온 사진만 골라 review 또는 Apple Photos 앨범에 반영합니다.
 
@@ -897,7 +1011,8 @@ async def curate_best_photos(
         date_from: 시작 날짜 (ISO)
         date_to: 종료 날짜 (ISO)
         limit: 최신/필터 결과에서 처리할 최대 사진 수
-        quality_top_percent: quality_score 상위 몇 퍼센트를 잘 나온 사진으로 볼지 결정
+        quality_top_percent: 상위 몇 퍼센트를 잘 나온 사진으로 볼지 결정
+        selection_profile: Ranking profile — "general", "person", "landscape"
 
     Returns:
         JSON with job_id, quality threshold, selected photo ids, and optional album write-back result.
@@ -922,6 +1037,12 @@ async def curate_best_photos(
             "error": "target_album_name is required when writeback_mode='album'",
         }, ensure_ascii=False)
 
+    if not is_valid_selection_profile(selection_profile):
+        return _selection_profile_error(selection_profile)
+
+    normalized_profile = normalize_selection_profile(selection_profile)
+    score_field = "quality_score" if normalized_profile == "general" else "total_score"
+
     job, db, results = await _run_sync_classification(
         source,
         source_path,
@@ -930,6 +1051,7 @@ async def curate_best_photos(
         date_from=date_from,
         date_to=date_to,
         limit=limit,
+        selection_profile=normalized_profile,
     )
     if job is None or not results:
         return json.dumps({"error": "No photos found from source"}, ensure_ascii=False)
@@ -937,6 +1059,7 @@ async def curate_best_photos(
     normalized_percent, quality_min_score, selected = _select_top_quality_results(
         results,
         quality_top_percent,
+        score_field=score_field,
     )
     selected_photo_ids = {
         str(item.get("photo_id", "")) for item in selected if item.get("photo_id")
@@ -948,6 +1071,8 @@ async def curate_best_photos(
         selected_photo_ids,
         quality_top_percent=normalized_percent,
         quality_min_score=quality_min_score,
+        selection_profile=normalized_profile,
+        score_field=score_field,
     )
 
     album_result: dict[str, object] | None = None
@@ -965,10 +1090,20 @@ async def curate_best_photos(
         "ranked_count": len(results),
         "selected_count": len(selected_photo_ids),
         "selected_photo_ids": sorted(selected_photo_ids),
+        "selection_profile": normalized_profile,
+        "selection_policy": {
+            "mode": "top_percent",
+            "selection_profile": normalized_profile,
+            "score_field": score_field,
+            "top_percent": normalized_percent,
+            "min_score": round(quality_min_score, 2),
+        },
         "quality_policy": {
-            "mode": "quality_top_percent",
+            "mode": "quality_top_percent" if score_field == "quality_score" else "profile_top_percent",
             "quality_top_percent": normalized_percent,
             "quality_min_score": round(quality_min_score, 2),
+            "selection_profile": normalized_profile,
+            "score_field": score_field,
         },
         "writeback_mode": normalized_mode,
         "target_album_name": target_album_name,
@@ -1098,6 +1233,7 @@ async def classify_and_organize(
     date_from: str = "",
     date_to: str = "",
     limit: int = 100,
+    selection_profile: str = "general",
 ) -> str:
     """사진 소스에서 불러와 분류하고 Apple Photos 앨범으로 정리하는 전체 워크플로우.
 
@@ -1115,10 +1251,16 @@ async def classify_and_organize(
         date_from: 시작 날짜 (ISO)
         date_to: 종료 날짜 (ISO)
         limit: 최대 처리 사진 수
+        selection_profile: Ranking profile — "general", "person", "landscape"
 
     Returns:
         JSON with job_id, ranked_count, albums_created, photos_organized.
     """
+    if not is_valid_selection_profile(selection_profile):
+        return _selection_profile_error(selection_profile)
+
+    normalized_profile = normalize_selection_profile(selection_profile)
+
     job, db, results = await _run_sync_classification(
         source,
         source_path,
@@ -1127,6 +1269,7 @@ async def classify_and_organize(
         date_from=date_from,
         date_to=date_to,
         limit=limit,
+        selection_profile=normalized_profile,
     )
     if job is None or not results:
         return json.dumps({"error": "No photos found from source"})
@@ -1145,6 +1288,7 @@ async def classify_and_organize(
         "job_id": job.id,
         "ranked_count": len(results),
         "top_score": results[0].get("total_score", 0) if results else 0,
+        "selection_profile": normalized_profile,
         **album_result,
     }
     _finalize_sync_job(job, db, summary)

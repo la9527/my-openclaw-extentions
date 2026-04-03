@@ -27,14 +27,11 @@ from engines.face import FaceEngine
 from jobs import Job, JobProgress
 from models import DuplicateGroup, EventType, QualityScore, RankedPhoto
 from scoring import (
-    WEIGHT_EVENT,
-    WEIGHT_FAMILY,
-    WEIGHT_QUALITY,
-    WEIGHT_UNIQUENESS,
     compute_event_score,
     compute_family_score,
     compute_quality_score,
     compute_uniqueness_score,
+    rank_photos,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,6 +142,7 @@ class Pipeline:
         self,
         photos: list[dict],
         job: Job | None = None,
+        selection_profile: str = "general",
     ) -> list[RankedPhoto]:
         """Run full 2-stage pipeline.
 
@@ -267,7 +265,7 @@ class Pipeline:
         logger.info("Stage2 done: %d processed in %.2fs", len(stage2_candidates), t_s2)
 
         # ── Rank results ──
-        ranked = self._rank(candidates, dup_groups)
+        ranked = self._rank(candidates, dup_groups, selection_profile)
 
         t_total = time.perf_counter() - t_start
         stage_times = {
@@ -520,34 +518,26 @@ class Pipeline:
         self,
         candidates: list[PhotoCandidate],
         dup_groups: list[DuplicateGroup],
+        selection_profile: str,
     ) -> list[RankedPhoto]:
         """Aggregate scores and rank."""
-        ranked = []
+        photo_scores = []
         for c in candidates:
-            total = (
-                c.quality_score * WEIGHT_QUALITY
-                + c.family_score * WEIGHT_FAMILY
-                + c.event_score * WEIGHT_EVENT
-                + c.uniqueness_score * WEIGHT_UNIQUENESS
-            )
-            ranked.append(
-                RankedPhoto(
-                    photo_id=c.photo_id,
-                    total_score=round(total, 2),
-                    quality_score=round(c.quality_score, 2),
-                    family_score=round(c.family_score, 2),
-                    event_score=round(c.event_score, 2),
-                    uniqueness_score=round(c.uniqueness_score, 2),
-                    scene_description=c.scene_description,
-                    event_type=c.event_type,
-                    faces_detected=c.face_count,
-                    known_persons=c.known_persons,
-                    has_gps=c.has_gps,
-                    meaningful_score=c.meaningful_score,
-                    capture_date=c.capture_date,
-                )
+            photo_scores.append(
+                {
+                    "photo_id": c.photo_id,
+                    "quality_score": round(c.quality_score, 2),
+                    "family_score": round(c.family_score, 2),
+                    "event_score": round(c.event_score, 2),
+                    "uniqueness_score": round(c.uniqueness_score, 2),
+                    "scene_description": c.scene_description,
+                    "event_type": c.event_type,
+                    "faces_detected": c.face_count,
+                    "known_persons": c.known_persons,
+                    "has_gps": c.has_gps,
+                    "meaningful_score": c.meaningful_score,
+                    "capture_date": c.capture_date,
+                }
             )
 
-        # Primary: total_score desc, tiebreaker: meaningful_score desc
-        ranked.sort(key=lambda r: (r.total_score, r.meaningful_score), reverse=True)
-        return ranked
+        return rank_photos(photo_scores, selection_profile=selection_profile)

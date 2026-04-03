@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PHOTOS_CLASSIFY_ROUTE_BASE,
   createPhotosReviewHttpHandler,
+  fetchRecentReviewJobs,
+  fetchReviewJobSummary,
   resolveReviewProxyTarget,
 } from "./review-http.js";
 
@@ -281,5 +283,64 @@ describe("createPhotosReviewHttpHandler", () => {
     expect(handled).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("review job fetch helpers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("fetches a single job summary", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        job_id: "job-1",
+        source: "apple",
+        source_path: "recent",
+        request_options: { selection_profile: "person" },
+        status: "running",
+        created_at: 1,
+        started_at: 2,
+        finished_at: null,
+        progress: { total: 10, completed: 3, stage: "vlm", current_file: "a.jpg", percent: 30, errors: [] },
+        photo_count: 0,
+        selected_count: 0,
+      }), { status: 200 }));
+
+    const job = await fetchReviewJobSummary({
+      reviewBaseUrl: "http://127.0.0.1:8765",
+      jobId: "job-1",
+    });
+
+    expect(job?.request_options?.selection_profile).toBe("person");
+  });
+
+  it("fetches recent job summaries", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        {
+          job_id: "job-1",
+          source: "apple",
+          source_path: "recent",
+          request_options: { selection_profile: "landscape" },
+          status: "completed",
+          created_at: 1,
+          started_at: 2,
+          finished_at: 3,
+          progress: { total: 10, completed: 10, stage: "vlm", current_file: "", percent: 100, errors: [] },
+          photo_count: 10,
+          selected_count: 2,
+        },
+      ]), { status: 200 }));
+
+    const jobs = await fetchRecentReviewJobs({
+      reviewBaseUrl: "http://127.0.0.1:8765",
+      limit: 3,
+    });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.request_options?.selection_profile).toBe("landscape");
   });
 });

@@ -53,6 +53,7 @@ def _build_job_summaries(db: JobDB, limit: int = 20, status: str | None = None) 
         "job_id": job.id,
         "source": job.source,
         "source_path": job.source_path,
+        "request_options": job.request_options,
         "status": job.status.value,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -80,6 +81,18 @@ def list_jobs_api(limit: int = 20, status: str | None = None) -> list[dict]:
     return _build_job_summaries(db, limit=limit, status=status)
   finally:
     db.close()
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_api(job_id: str) -> dict:
+    db = _get_db()
+    try:
+        for job in _build_job_summaries(db, limit=1000):
+            if job["job_id"] == job_id:
+                return job
+        raise HTTPException(status_code=404, detail="job not found")
+    finally:
+        db.close()
 
 
 @app.get("/api/jobs/{job_id}/items")

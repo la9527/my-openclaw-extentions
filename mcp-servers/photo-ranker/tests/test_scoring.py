@@ -2,6 +2,9 @@
 
 from models import DuplicateGroup, EventType, FaceResult, SceneDescription
 from scoring import (
+    DEFAULT_SELECTION_PROFILE,
+    is_valid_selection_profile,
+    normalize_selection_profile,
     WEIGHT_EVENT,
     WEIGHT_FAMILY,
     WEIGHT_QUALITY,
@@ -254,3 +257,62 @@ class TestRankPhotos:
         ]
         ranked = rank_photos(scores)
         assert ranked[0].capture_date == "2026-03-15"
+
+    def test_person_profile_prefers_people_photos(self):
+        scores = [
+            self._make_score(
+                "landscape",
+                quality_score=85.0,
+                family_score=0.0,
+                event_score=65.0,
+                faces_detected=0,
+                scene_description="mountain lake landscape",
+                event_type="outdoor",
+            ),
+            self._make_score(
+                "portrait",
+                quality_score=78.0,
+                family_score=60.0,
+                event_score=40.0,
+                faces_detected=2,
+                known_persons=["Alice"],
+                event_type="portrait",
+            ),
+        ]
+        ranked = rank_photos(scores, selection_profile="person")
+        assert ranked[0].photo_id == "portrait"
+
+    def test_landscape_profile_prefers_outdoor_scene(self):
+        scores = [
+            self._make_score(
+                "portrait",
+                quality_score=82.0,
+                family_score=65.0,
+                event_score=45.0,
+                faces_detected=2,
+                known_persons=["Alice"],
+                event_type="portrait",
+            ),
+            self._make_score(
+                "landscape",
+                quality_score=80.0,
+                family_score=0.0,
+                event_score=75.0,
+                faces_detected=0,
+                scene_description="sunset over the ocean landscape",
+                event_type="outdoor",
+            ),
+        ]
+        ranked = rank_photos(scores, selection_profile="landscape")
+        assert ranked[0].photo_id == "landscape"
+
+
+class TestSelectionProfiles:
+    def test_normalize_selection_profile(self):
+        assert normalize_selection_profile("PERSON") == "person"
+        assert normalize_selection_profile("unknown") == DEFAULT_SELECTION_PROFILE
+
+    def test_is_valid_selection_profile(self):
+        assert is_valid_selection_profile("general") is True
+        assert is_valid_selection_profile("landscape") is True
+        assert is_valid_selection_profile("cinematic") is False

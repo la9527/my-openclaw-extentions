@@ -34,6 +34,7 @@ class JobDB:
                 id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
                 source_path TEXT NOT NULL,
+                request_json TEXT DEFAULT '{}',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at REAL NOT NULL,
                 started_at REAL,
@@ -128,6 +129,7 @@ class JobDB:
                 ON stage_checkpoints(job_id, stage);
             """
         )
+        self._ensure_column("jobs", "request_json", "TEXT DEFAULT '{}' ")
         self._ensure_column("face_embeddings", "bbox_json", "TEXT DEFAULT '[]'")
         self._repair_stale_jobs()
         self._conn.commit()
@@ -163,15 +165,16 @@ class JobDB:
         self._conn.execute(
             """
             INSERT OR REPLACE INTO jobs
-                (id, source, source_path, status, created_at,
+                (id, source, source_path, request_json, status, created_at,
                  started_at, finished_at, progress_json,
                  result_json, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
                 job.source,
                 job.source_path,
+                json.dumps(job.request_options or {}, ensure_ascii=False),
                 job.status.value,
                 job.created_at,
                 job.started_at,
@@ -591,6 +594,7 @@ class JobDB:
             id=row["id"],
             source=row["source"],
             source_path=row["source_path"],
+            request_options=json.loads(row["request_json"] or "{}"),
             status=JobStatus(row["status"]),
             created_at=row["created_at"],
             started_at=row["started_at"],

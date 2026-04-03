@@ -52,6 +52,32 @@ type ReviewTailscaleAccess = {
   allowedUserLogins: string[];
 };
 
+export type ReviewJobProgress = {
+  total: number;
+  completed: number;
+  stage: string;
+  current_file: string;
+  percent: number;
+  errors: string[];
+};
+
+export type ReviewJobSummary = {
+  job_id: string;
+  source: string;
+  source_path: string;
+  request_options?: Record<string, unknown>;
+  status: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  progress: ReviewJobProgress;
+  result_summary?: Record<string, unknown> | null;
+  error_message?: string | null;
+  photo_count: number;
+  selected_count: number;
+  preview_path?: string;
+};
+
 const DEFAULT_REVIEW_APP_COMMAND = "uv";
 const DEFAULT_REVIEW_APP_ARGS = ["run", "python", "review_app.py"];
 const DEFAULT_REVIEW_APP_START_TIMEOUT_MS = 5000;
@@ -148,6 +174,77 @@ export function createPhotosReviewHttpHandler(params: {
       return true;
     }
   };
+}
+
+export async function fetchReviewJobSummary(params: {
+  reviewBaseUrl: string;
+  jobId: string;
+  autoStart?: ReviewAppAutoStart;
+  logger?: PluginLogger;
+}): Promise<ReviewJobSummary | null> {
+  const result = await fetchReviewJobData({
+    reviewBaseUrl: params.reviewBaseUrl,
+    path: `/api/jobs/${encodeURIComponent(params.jobId)}`,
+    autoStart: params.autoStart,
+    logger: params.logger,
+  });
+  return Array.isArray(result) ? null : result;
+}
+
+export async function fetchRecentReviewJobs(params: {
+  reviewBaseUrl: string;
+  limit?: number;
+  status?: string;
+  autoStart?: ReviewAppAutoStart;
+  logger?: PluginLogger;
+}): Promise<ReviewJobSummary[]> {
+  const search = new URLSearchParams();
+  if (params.limit) {
+    search.set("limit", String(params.limit));
+  }
+  if (params.status) {
+    search.set("status", params.status);
+  }
+  const suffix = search.size > 0 ? `?${search.toString()}` : "";
+  const result = await fetchReviewJobData({
+    reviewBaseUrl: params.reviewBaseUrl,
+    path: `/api/jobs${suffix}`,
+    autoStart: params.autoStart,
+    logger: params.logger,
+  });
+  return Array.isArray(result) ? result : [];
+}
+
+async function fetchReviewJobData(params: {
+  reviewBaseUrl: string;
+  path: string;
+  autoStart?: ReviewAppAutoStart;
+  logger?: PluginLogger;
+}): Promise<ReviewJobSummary[] | ReviewJobSummary | null> {
+  const ready = (await isReviewAppHealthy(params.reviewBaseUrl)) || (await ensureReviewAppRunning({
+    reviewBaseUrl: params.reviewBaseUrl,
+    autoStart: params.autoStart,
+    logger: params.logger,
+  }));
+  if (!ready) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(new URL(params.path, params.reviewBaseUrl));
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error(`review app returned ${response.status}`);
+    }
+    return (await response.json()) as ReviewJobSummary[] | ReviewJobSummary;
+  } catch (error) {
+    params.logger?.warn?.(
+      `photos-classify: failed to fetch review job data from ${params.path}: ${String(error)}`,
+    );
+    return null;
+  }
 }
 
 async function ensureReviewAppRunning(params: {

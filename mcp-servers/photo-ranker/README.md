@@ -12,6 +12,7 @@ VLM(Vision Language Model), CLIP 기반 미적 평가, 얼굴 인식, 중복 감
 - **중복 감지** — perceptual hash 기반 유사 사진 그룹핑
 - **LAION Aesthetic** — sigmoid 매핑으로 3-7 구간 변별력 확대
 - **베스트 샷 랭킹** — 다차원 점수를 종합하여 최고의 사진 선별
+- **선택 프로필** — `general`, `person`, `landscape` 프로필별로 인물 중심/풍경 중심 선별 지원
 - **Apple Photos 연동** — osxphotos 읽기 + photoscript 앨범 쓰기
 - **iCloud 원본 자동 확보** — Apple Photos에서 로컬에 없는 사진도 분류 시점에 자동 export로 확보
 - **백그라운드 Job 시스템** — 대량 분류 작업을 비동기 Job으로 관리
@@ -63,14 +64,15 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | `describe_scene` | VLM으로 장면을 자연어로 묘사 | `image_b64`, `prompt?` |
 | `classify_event` | 이벤트 타입 자동 분류 | `image_b64` |
 | `find_duplicates` | 해시 기반 중복 사진 그룹핑 | `photo_hashes_json` (해시 딕셔너리), `threshold?` |
-| `rank_best_shots` | 종합 점수로 베스트 샷 랭킹 | `photo_scores_json` (점수 배열), `top_n?` |
+| `rank_best_shots` | 종합 점수로 베스트 샷 랭킹 | `photo_scores_json` (점수 배열), `top_n?`, `selection_profile?` |
 
 ### Job 관리 도구 (5개)
 
 | 도구 | 설명 | 주요 파라미터 |
 |---|---|---|
-| `start_classify_job` | 백그라운드 분류 작업 시작 | `source` ("local"/"apple"/"gcs"), `source_path` |
+| `start_classify_job` | 백그라운드 분류 작업 시작 | `source` ("local"/"apple"/"gcs"), `source_path`, `selection_profile?` |
 | `get_job_status` | 작업 상태 조회 | `job_id` |
+| `get_job_summary` | 진행률/선택 프로필/선택 개수 포함 요약 조회 | `job_id` |
 | `get_job_result` | 완료된 작업의 랭킹 결과 조회 | `job_id`, `top_n?` (기본 20) |
 | `cancel_job` | 실행/대기 중인 작업 취소 | `job_id` |
 | `list_jobs` | 작업 목록 조회 | `status?` ("pending"/"running"/"completed"/"failed"/"cancelled") |
@@ -109,8 +111,8 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 
 | 도구 | 설명 | 주요 파라미터 |
 |---|---|---|
-| `classify_and_organize` | 소스 → 분류 → 앨범 정리 전체 워크플로우 | `source`, `source_path`, `album_prefix?`, `limit?` |
-| `curate_best_photos` | 최신/필터된 사진에서 quality 상위 퍼센트를 고르고 review 또는 단일 앨범에 반영 | `source`, `limit?`, `quality_top_percent?`, `writeback_mode?`, `target_album_name?` |
+| `classify_and_organize` | 소스 → 분류 → 앨범 정리 전체 워크플로우 | `source`, `source_path`, `album_prefix?`, `limit?`, `selection_profile?` |
+| `curate_best_photos` | 최신/필터된 사진에서 상위 퍼센트를 고르고 review 또는 단일 앨범에 반영 | `source`, `limit?`, `quality_top_percent?`, `writeback_mode?`, `target_album_name?`, `selection_profile?` |
 
 ## 점수 체계
 
@@ -122,6 +124,12 @@ uv sync --extra face          # 얼굴 인식 (face-recognition)
 | 가족 (family) | 0.25 | 얼굴 수, 알려진 인물, 표정 |
 | 이벤트 (event) | 0.25 | 이벤트 분류 신뢰도 |
 | 고유성 (uniqueness) | 0.20 | 중복이 적을수록 높은 점수 |
+
+선택 프로필별 동작:
+
+- `general` — 기존 균형형. `curate_best_photos` 는 `quality_score` 기준 상위 퍼센트를 유지
+- `person` — 얼굴 수, known person, portrait/event 맥락을 더 강하게 반영
+- `landscape` — `OUTDOOR`/`TRAVEL`, 장면 설명의 풍경 키워드, low-face 컷을 우대
 
 ## 2단계 파이프라인
 
@@ -216,6 +224,29 @@ curate_best_photos(
   quality_top_percent=30,
   writeback_mode="album",
   target_album_name="잘나온사진1"
+)
+```
+
+Apple Photos 최신 30장을 풍경 중심으로 다시 랭킹하고 상위 30%만 고르기:
+
+```text
+curate_best_photos(
+  source="apple",
+  limit=30,
+  quality_top_percent=30,
+  selection_profile="landscape",
+  writeback_mode="review"
+)
+```
+
+백그라운드 job 을 인물 중심으로 실행:
+
+```text
+start_classify_job(
+  source="apple",
+  source_path="가족",
+  selection_profile="person",
+  limit=120
 )
 ```
 

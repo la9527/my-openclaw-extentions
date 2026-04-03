@@ -20,6 +20,15 @@ WEIGHT_FAMILY = 0.25
 WEIGHT_EVENT = 0.25
 WEIGHT_UNIQUENESS = 0.20
 
+DEFAULT_SELECTION_PROFILE = "general"
+SELECTION_PROFILES = ("general", "person", "landscape")
+
+PROFILE_WEIGHTS: dict[str, tuple[float, float, float, float]] = {
+    "general": (WEIGHT_QUALITY, WEIGHT_FAMILY, WEIGHT_EVENT, WEIGHT_UNIQUENESS),
+    "person": (0.30, 0.40, 0.10, 0.20),
+    "landscape": (0.45, 0.05, 0.30, 0.20),
+}
+
 EVENT_WEIGHTS: dict[EventType, float] = {
     EventType.BIRTHDAY: 90,
     EventType.GRADUATION: 90,
@@ -31,6 +40,65 @@ EVENT_WEIGHTS: dict[EventType, float] = {
     EventType.DAILY: 30,
     EventType.OTHER: 20,
 }
+
+LANDSCAPE_SCENE_KEYWORDS = (
+    "landscape",
+    "mountain",
+    "ocean",
+    "sea",
+    "beach",
+    "sunset",
+    "sunrise",
+    "forest",
+    "sky",
+    "river",
+    "lake",
+    "valley",
+    "scenery",
+    "nature",
+)
+
+
+def normalize_selection_profile(selection_profile: str | None) -> str:
+    value = (selection_profile or DEFAULT_SELECTION_PROFILE).strip().lower()
+    if value in SELECTION_PROFILES:
+        return value
+    return DEFAULT_SELECTION_PROFILE
+
+
+def is_valid_selection_profile(selection_profile: str | None) -> bool:
+    value = (selection_profile or DEFAULT_SELECTION_PROFILE).strip().lower()
+    return value in SELECTION_PROFILES
+
+
+def _score_profile_bonus(photo_score: dict, selection_profile: str) -> float:
+    if selection_profile == "person":
+        faces_detected = int(photo_score.get("faces_detected", 0) or 0)
+        known_persons = len(photo_score.get("known_persons", []))
+        event_type = str(photo_score.get("event_type", "")).lower()
+        bonus = min(12.0, faces_detected * 4.0) + min(12.0, known_persons * 6.0)
+        if event_type == EventType.PORTRAIT.value:
+            bonus += 8.0
+        elif event_type in {EventType.BIRTHDAY.value, EventType.CELEBRATION.value}:
+            bonus += 4.0
+        return min(25.0, bonus)
+
+    if selection_profile == "landscape":
+        faces_detected = int(photo_score.get("faces_detected", 0) or 0)
+        event_type = str(photo_score.get("event_type", "")).lower()
+        scene_description = str(photo_score.get("scene_description", "")).lower()
+        bonus = 0.0
+        if event_type in {EventType.OUTDOOR.value, EventType.TRAVEL.value}:
+            bonus += 10.0
+        if faces_detected == 0:
+            bonus += 8.0
+        elif faces_detected == 1:
+            bonus += 2.0
+        if any(keyword in scene_description for keyword in LANDSCAPE_SCENE_KEYWORDS):
+            bonus += 10.0
+        return min(25.0, bonus)
+
+    return 0.0
 
 
 def compute_quality_score(
@@ -119,6 +187,7 @@ def compute_uniqueness_score(
 def rank_photos(
     photo_scores: list[dict],
     top_n: int | None = None,
+    selection_profile: str = DEFAULT_SELECTION_PROFILE,
 ) -> list[RankedPhoto]:
     """Aggregate sub-scores and produce ranked results.
 
@@ -133,13 +202,17 @@ def rank_photos(
       - faces_detected: int
       - known_persons: list[str]
     """
+    normalized_profile = normalize_selection_profile(selection_profile)
+    weight_quality, weight_family, weight_event, weight_uniqueness = PROFILE_WEIGHTS[normalized_profile]
+
     ranked = []
     for ps in photo_scores:
         total = (
-            ps["quality_score"] * WEIGHT_QUALITY
-            + ps["family_score"] * WEIGHT_FAMILY
-            + ps["event_score"] * WEIGHT_EVENT
-            + ps["uniqueness_score"] * WEIGHT_UNIQUENESS
+            ps["quality_score"] * weight_quality
+            + ps["family_score"] * weight_family
+            + ps["event_score"] * weight_event
+            + ps["uniqueness_score"] * weight_uniqueness
+            + _score_profile_bonus(ps, normalized_profile)
         )
         ranked.append(
             RankedPhoto(

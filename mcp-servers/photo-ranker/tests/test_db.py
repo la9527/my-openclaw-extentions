@@ -17,7 +17,12 @@ def db(tmp_path):
 
 class TestJobDB:
     def test_save_and_load_job(self, db):
-        job = Job(id="t1", source="local", source_path="/photos")
+        job = Job(
+            id="t1",
+            source="local",
+            source_path="/photos",
+            request_options={"selection_profile": "landscape"},
+        )
         db.save_job(job)
 
         loaded = db.load_job("t1")
@@ -25,6 +30,7 @@ class TestJobDB:
         assert loaded.id == "t1"
         assert loaded.source == "local"
         assert loaded.status == JobStatus.PENDING
+        assert loaded.request_options["selection_profile"] == "landscape"
 
     def test_load_nonexistent(self, db):
         assert db.load_job("fake") is None
@@ -98,6 +104,7 @@ class TestJobDB:
             id="t3",
             source="local",
             source_path="/tmp",
+            request_options={"selection_profile": "person"},
             progress=JobProgress(
                 total=100, completed=42, stage="vlm", current_file="x.jpg"
             ),
@@ -107,6 +114,7 @@ class TestJobDB:
         assert loaded.progress.total == 100
         assert loaded.progress.completed == 42
         assert loaded.progress.stage == "vlm"
+        assert loaded.request_options["selection_profile"] == "person"
 
 
 class TestKnownFaces:

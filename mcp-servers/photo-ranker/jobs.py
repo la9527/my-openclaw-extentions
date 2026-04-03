@@ -50,6 +50,7 @@ class Job:
     id: str
     source: str  # "local" | "apple" | "gcs"
     source_path: str  # directory or bucket
+    request_options: dict = field(default_factory=dict)
     status: JobStatus = JobStatus.PENDING
     progress: JobProgress = field(default_factory=JobProgress)
     created_at: float = field(default_factory=time.time)
@@ -63,6 +64,7 @@ class Job:
             "id": self.id,
             "source": self.source,
             "source_path": self.source_path,
+            "request_options": self.request_options,
             "status": self.status.value,
             "progress": self.progress.to_dict(),
             "created_at": self.created_at,
