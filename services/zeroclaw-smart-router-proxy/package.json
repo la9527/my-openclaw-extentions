@@ -1,0 +1,14 @@
+{
+  "name": "zeroclaw-smart-router-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ZeroClaw용 OpenAI-compatible smart-router proxy draft",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs"
+  }
+}
