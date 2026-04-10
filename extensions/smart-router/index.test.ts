@@ -10,9 +10,9 @@ type ResolvedConfigForTest = Parameters<typeof __testing.resolveEvaluationReques
 
 function buildResolvedConfig(overrides: Partial<ResolvedConfigForTest> = {}): ResolvedConfigForTest {
   return {
-    localProvider: "lmstudio",
-    localModel: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-    localBaseUrl: "http://127.0.0.1:1235/v1",
+    localProvider: "llama-cpp",
+    localModel: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+    localBaseUrl: "http://127.0.0.1:1242/v1",
     localApi: "openai-completions",
     remoteProvider: "openai",
     nanoModel: "gpt-5.4-nano-2026-03-17",
@@ -236,8 +236,8 @@ describe("smart-router route metadata", () => {
 
     expect(resolved).toMatchObject({
       targetTier: "local",
-      model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-      baseUrl: "http://127.0.0.1:1235/v1",
+      model: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+      baseUrl: "http://127.0.0.1:1242/v1",
       apiType: "openai",
     });
   });
@@ -508,12 +508,12 @@ describe("smart-router route metadata", () => {
       {
         tier: "local",
         provider: "smart-router",
-        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-        baseUrl: "http://127.0.0.1:1235/v1",
+        model: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+        baseUrl: "http://127.0.0.1:1242/v1",
         api: "openai-completions",
         contextWindow: 32768,
         maxTokens: 8192,
-        label: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        label: "local:LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
       },
       {
         messages: [{ role: "user", content: "인사만 해줘" }],
@@ -532,13 +532,13 @@ describe("smart-router route metadata", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:1235/v1/chat/completions",
+      "http://127.0.0.1:1242/v1/chat/completions",
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchMock.mock.calls[0]?.[1] as { body?: string };
     expect(request.body).toBeTypeOf("string");
     expect(JSON.parse(request.body ?? "{}")).toMatchObject({
-      model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      model: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
       stream: true,
       messages: [{ role: "user", content: "인사만 해줘" }],
     });

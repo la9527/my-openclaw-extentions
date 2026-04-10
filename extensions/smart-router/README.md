@@ -2,11 +2,30 @@
 
 OpenClaw에서 요청 복잡도에 따라 로컬 LLM과 외부 LLM을 자동으로 고르는 플러그인입니다.
 
+## 현재 환경
+
+기준 시점: `2026-04-04`
+
+현재 문서 기준 로컬 경로는 아래를 뜻합니다.
+
+| 항목 | 현재 값 |
+|---|---|
+| local runtime | host macOS `llama-server` |
+| local endpoint | `http://127.0.0.1:1242/v1` |
+| local 기본 모델 | `LiquidAI/LFM2-24B-A2B-GGUF:Q4_0` |
+| OpenClaw runtime | 글로벌 설치본 `openclaw 2026.4.2` |
+
+주의:
+
+1. 현재 `localProvider: "llama-cpp"` 는 host `llama-server` OpenAI-compatible endpoint를 뜻한다.
+2. host `llama-server` 가 `1242` 에 OpenAI-compatible endpoint를 노출하고 있고, smart-router는 그 endpoint를 local 경로로 사용한다.
+3. 이전 Docker Ollama / `gemma3:4b` 기준과 현재 기준 차이는 [../../docs/smart-router-environment-history-2026-04-04.md](../../docs/smart-router-environment-history-2026-04-04.md)에 정리했다.
+
 현재 기본 라우팅은 아래와 같습니다.
 
 | 복잡도 | 기본 target | 기본 모델 |
 |---|---|---|
-| `simple` | `local` | `gemma3:4b` |
+| `simple` | `local` | `LiquidAI/LFM2-24B-A2B-GGUF:Q4_0` |
 | `moderate` | `mini` | `gpt-5.4-mini-2026-03-17` |
 | `complex` | `mini` | `gpt-5.4-mini-2026-03-17` |
 | `advanced` | `full` | `gpt-5.4-2026-03-05` |
@@ -43,7 +62,7 @@ full/advanced
 
 1. 가장 안정적으로 쓰려면 `rule`
 2. `nano`를 경량 remote + 분류 모델로 함께 쓰려면 `llm` + `evaluationLlmTarget: nano`
-3. local 분류 모델을 쓰려면 `llm` + `evaluationLlmTarget: local` (예: LM Studio LFM2)
+3. local 분류 모델을 쓰려면 `llm` + `evaluationLlmTarget: local` (예: host `llama-server` + LFM2 GGUF)
 
 2026-03-27 실측 기준 추가 메모:
 
@@ -67,18 +86,20 @@ full/advanced
 
 | 항목 | 값 |
 |---|---|
-| OpenClaw | 2026.3.13 이상 권장 |
+| OpenClaw | 2026.4.2 실검증, 2026.3.13 이상 권장 |
 | Node.js | 22+ |
-| 로컬 LLM | Ollama 권장 (LM Studio도 가능) |
+| 로컬 LLM | host `llama-server` 권장 (Docker Ollama는 대체/실험 프로필) |
 | 외부 인증 | `OPENAI_API_KEY` |
 
 현재 권장 local 연결값:
 
 ```text
-localBaseUrl = http://127.0.0.1:1235/v1
+localBaseUrl = http://127.0.0.1:1242/v1
 localApi = openai
-localModel = lmstudio-community/LFM2-24B-A2B-MLX-4bit
+localModel = LiquidAI/LFM2-24B-A2B-GGUF:Q4_0
 ```
+
+현재 실운영 local provider ID 는 `llama-cpp` 이고, host `llama-server` OpenAI-compatible endpoint를 직접 사용한다.
 
 ## 빠른 설정
 
@@ -114,9 +135,9 @@ localModel = lmstudio-community/LFM2-24B-A2B-MLX-4bit
       "smart-router": {
         "enabled": true,
         "config": {
-          "localProvider": "lmstudio",
-          "localModel": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-          "localBaseUrl": "http://127.0.0.1:1235/v1",
+          "localProvider": "llama-cpp",
+          "localModel": "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+          "localBaseUrl": "http://127.0.0.1:1242/v1",
           "localApi": "openai",
           "remoteProvider": "openai",
           "nanoModel": "gpt-5.4-nano-2026-03-17",
@@ -146,9 +167,9 @@ localModel = lmstudio-community/LFM2-24B-A2B-MLX-4bit
 
 | 키 | 기본값 | 설명 |
 |---|---|---|
-| `localProvider` | `lmstudio` | 로컬 provider ID |
-| `localModel` | `lmstudio-community/LFM2-24B-A2B-MLX-4bit` | 로컬 기본 모델 |
-| `localBaseUrl` | `http://127.0.0.1:1235/v1` | 로컬 API 주소 |
+| `localProvider` | `llama-cpp` | 로컬 provider ID. host `llama-server` OpenAI-compatible endpoint를 가리킨다 |
+| `localModel` | `LiquidAI/LFM2-24B-A2B-GGUF:Q4_0` | 로컬 기본 모델 |
+| `localBaseUrl` | `http://127.0.0.1:1242/v1` | 로컬 API 주소 |
 | `localApi` | `openai` | `openai` 또는 `ollama` |
 | `remoteProvider` | `openai` | 외부 provider ID |
 | `nanoModel` | `gpt-5.4-nano-2026-03-17` | 경량 비교/요약용 nano tier, `llm` 분류 모델, local fallback 승격 tier |
@@ -263,7 +284,7 @@ retune 배치 핵심 결과:
 게이트웨이 로그에는 아래처럼 남습니다.
 
 ```text
-[smart-router] 🏠 simple (score: 1, eval: rule) → local:gemma3:4b | 짧은 인사
+[smart-router] 🏠 simple (score: 1, eval: rule) → local:LiquidAI/LFM2-24B-A2B-GGUF:Q4_0 | 짧은 인사
 [smart-router] ☁️ moderate (score: 4, eval: llm) → mini:gpt-5.4-mini-2026-03-17 | 일반 설명 요청
 [smart-router] ☁️ moderate (score: 5, eval: rule) → nano:gpt-5.4-nano-2026-03-17 | 짧은 비교 요약 요청
 [smart-router] ☁️ complex (score: 11, eval: rule) → mini:gpt-5.4-mini-2026-03-17 | 코드 리팩토링 및 분석 요청
@@ -386,7 +407,7 @@ openclaw agent --local --to +15555550125 --message '다음 TypeScript 코드를 
 
 | 모델 ref | 의미 |
 |---|---|
-| `smart-router/local` | LM Studio 로컬 모델 직접 사용 |
+| `smart-router/local` | host `llama-server` 의 LFM2 GGUF 로컬 모델 직접 사용 |
 | `smart-router/nano` | nano 모델 직접 사용 |
 | `smart-router/mini` | mini 모델 직접 사용 |
 | `smart-router/full` | full 모델 직접 사용 |

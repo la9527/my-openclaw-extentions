@@ -10,10 +10,10 @@
       "method": "openai-api-key",
       "choiceId": "smart-router-openai-api-key",
       "choiceLabel": "Smart Router with OpenAI API key",
-      "choiceHint": "OpenAI API key 하나로 LM Studio와 OpenAI를 함께 라우팅",
+      "choiceHint": "OpenAI API key 하나로 llama.cpp와 OpenAI를 함께 라우팅",
       "groupId": "smart-router",
       "groupLabel": "Smart Router",
-      "groupHint": "LM Studio local + OpenAI remote"
+      "groupHint": "llama.cpp local + OpenAI remote"
     }
   ],
   "configSchema": {
@@ -22,15 +22,15 @@
     "properties": {
       "localProvider": {
         "type": "string",
-        "description": "로컬 LLM 프로바이더 ID (예: lmstudio, ollama)"
+        "description": "로컬 LLM 프로바이더 ID (예: llama-cpp, ollama)"
       },
       "localModel": {
         "type": "string",
-        "description": "로컬 LLM 모델 ID (예: lmstudio-community/LFM2-24B-A2B-MLX-4bit)"
+        "description": "로컬 LLM 모델 ID (예: LiquidAI/LFM2-24B-A2B-GGUF:Q4_0)"
       },
       "localBaseUrl": {
         "type": "string",
-        "description": "로컬 LLM API 기본 URL (예: http://127.0.0.1:1235/v1)"
+        "description": "로컬 LLM API 기본 URL (예: http://127.0.0.1:1242/v1)"
       },
       "localApi": {
         "type": "string",

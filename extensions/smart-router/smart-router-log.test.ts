@@ -180,9 +180,9 @@ describe("smart-router execution logger", () => {
       threshold: "moderate",
       routeTier: "local",
       routeProvider: "smart-router",
-      routeModel: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      routeModel: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
       routeApi: "openai-completions",
-      routeLabel: "local:lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+      routeLabel: "local:LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
       context: { messages: [{ role: "user", content: [{ type: "text", text: "hello router" }] }] },
     });
 
@@ -201,7 +201,7 @@ describe("smart-router execution logger", () => {
       {
         provider: "smart-router",
         api: "openai-completions",
-        id: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        id: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
       },
     );
 
@@ -213,7 +213,7 @@ describe("smart-router execution logger", () => {
         content: [{ type: "text", text: "local reply without usage" }],
         api: "openai-completions",
         provider: "smart-router",
-        model: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
+        model: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
         usage: {
           input: 0,
           output: 0,

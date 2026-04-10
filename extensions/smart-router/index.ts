@@ -61,9 +61,9 @@ const CLASSIFIER_TIMEOUT_FULL_THRESHOLD_MS = 3_000;
 
 /** 플러그인 설정 기본값 */
 const DEFAULTS = {
-  localProvider: "lmstudio",
-  localModel: "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-  localBaseUrl: "http://127.0.0.1:1235/v1",
+  localProvider: "llama-cpp",
+  localModel: "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+  localBaseUrl: "http://127.0.0.1:1242/v1",
   localApi: "openai" as const,
   remoteProvider: "openai",
   nanoModel: "gpt-5.4-nano-2026-03-17",
@@ -161,9 +161,10 @@ function resolveOpenAIChatCompletionsUrl(baseUrl: string): string {
 function resolveRouterApiKey(): string {
   return (
     process.env.OPENAI_API_KEY?.trim() ||
+    process.env.LLAMA_CPP_API_KEY?.trim() ||
     process.env.LMSTUDIO_API_KEY?.trim() ||
     process.env.OLLAMA_API_KEY?.trim() ||
-    "lm-studio"
+    "llama-cpp-local"
   );
 }
 
