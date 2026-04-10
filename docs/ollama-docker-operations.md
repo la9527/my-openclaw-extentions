@@ -1,26 +1,39 @@
-# Docker Ollama 운영 가이드
+# Docker Ollama 대체 운영 가이드
 
 ## 목적
 
-이 문서는 글로벌 `npm install -g openclaw` 설치본을 계속 사용하면서, 로컬 LLM 런타임만 `MyOpenClawRepo`에서 Docker Ollama로 운영하는 기준 문서다.
+이 문서는 글로벌 `npm install -g openclaw` 설치본을 계속 사용하면서, 로컬 LLM 런타임을 Docker Ollama로 대체하거나 실험할 때 참고하는 문서다.
 
-주의: 이 문서는 Docker Ollama 운영 프로필 문서다. smart-router 기본값 문서([extensions/smart-router/README.md](../extensions/smart-router/README.md))와 값이 다를 수 있다.
+주의:
+
+1. 이 문서는 현재 기본 운영안이 아니라 대체/실험 프로필 문서다.
+2. 현재 기본 운영 기준은 host `mlx_lm.server` + `LFM2` + `1235/1236` 구조다.
+3. 현재/이전 버전 비교는 [smart-router-environment-history-2026-04-04.md](smart-router-environment-history-2026-04-04.md)를 우선 본다.
 
 현재 채택 기준은 아래와 같다.
 
 - 실행 OpenClaw: 글로벌 설치본 `openclaw`
 - smart-router 플러그인 소스: `MyOpenClawRepo/extensions/smart-router`
-- 기본 local LLM 런타임: `LM Studio` (`http://127.0.0.1:1235/v1`)
+- 기본 local LLM 런타임: host `mlx_lm.server` (`http://127.0.0.1:1235/v1`)
 - 기본 local 모델: `lmstudio-community/LFM2-24B-A2B-MLX-4bit`
 - Docker Ollama(`MyOpenClawRepo/infra/docker/docker-compose.yml`)는 대체/실험 프로필
 
+## 버전 히스토리
+
+| 구분 | 이전 버전 | 현재 버전 |
+|---|---|---|
+| 기준 시점 | 2026-03 말 | 2026-04-04 |
+| 기본 local runtime | Docker Ollama 또는 LM Studio 혼용 문서 | host `mlx_lm.server` |
+| 기본 local 모델 | `gemma3:4b` 또는 초안 Ollama 계열 | `lmstudio-community/LFM2-24B-A2B-MLX-4bit` |
+| 문서 역할 | 운영 문서처럼 보였음 | 대체/실험 프로필 문서로 정리 |
+
 ## 관련 파일
 
-- compose: [infra/docker/docker-compose.yml](infra/docker/docker-compose.yml)
-- compose env 예시: [infra/docker/.env.example](infra/docker/.env.example)
-- 모델 pull 스크립트: [infra/scripts/pull-ollama-models.sh](infra/scripts/pull-ollama-models.sh)
-- 상태 확인 스크립트: [infra/scripts/check-ollama.sh](infra/scripts/check-ollama.sh)
-- OpenClaw 설정 예시: [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5)
+- compose: [../infra/docker/docker-compose.yml](../infra/docker/docker-compose.yml)
+- compose env 예시: [../infra/docker/.env.example](../infra/docker/.env.example)
+- 모델 pull 스크립트: [../infra/scripts/pull-ollama-models.sh](../infra/scripts/pull-ollama-models.sh)
+- 상태 확인 스크립트: [../infra/scripts/check-ollama.sh](../infra/scripts/check-ollama.sh)
+- OpenClaw 설정 예시: [../configs/openclaw-hybrid.json5](../configs/openclaw-hybrid.json5)
 
 ## 1. 최초 준비
 
@@ -47,6 +60,8 @@ bash infra/scripts/pull-ollama-models.sh
 - `plugins.entries.smart-router.config.evaluationTimeoutRetryCount = 1`
 - `plugins.entries.smart-router.config.evaluationTimeoutFallbackTarget = "nano"`
 
+여기서 `lmstudio` 는 logical provider ID 로 유지하며, 현재 실운영 endpoint 는 LM Studio 앱이 아니라 host `mlx_lm.server` 다.
+
 Ollama 대체 프로필을 쓰는 경우에만 아래를 추가한다.
 
 - `plugins.entries.smart-router.config.localProvider = "ollama"`
@@ -55,7 +70,7 @@ Ollama 대체 프로필을 쓰는 경우에만 아래를 추가한다.
 - `plugins.entries.smart-router.config.localApi = "ollama"`
 - `models.providers.ollama` 에 `gemma3:4b`, `qwen2.5:14b-instruct` 등록
 
-직접 예시는 [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5) 를 따른다.
+직접 예시는 [../configs/openclaw-hybrid.json5](../configs/openclaw-hybrid.json5) 를 따른다.
 
 ## 3. 실행 및 재시작
 
@@ -127,6 +142,8 @@ which openclaw
 openclaw --version
 openclaw models list | rg 'LFM2|lmstudio|smart-router|gemma3:4b|qwen2.5:14b-instruct'
 tail -n 50 /tmp/openclaw-gateway.log | grep smart-router
+curl -sS http://127.0.0.1:1235/v1/models
+curl -sS http://127.0.0.1:1236/v1/models
 ```
 
 ### 직접 모델 전환 예시
@@ -143,7 +160,7 @@ openclaw models set ollama/qwen2.5:14b-instruct
 
 - Docker Ollama published port 는 현재 `11435` 다. 호스트에 기존 Ollama가 `11434` 를 쓰고 있어 충돌을 피하기 위해 분리했다.
 - Ollama provider base URL 은 `http://127.0.0.1:11435` 처럼 native API 기준으로 써야 한다. `/v1` 를 붙이지 않는다.
-- LM Studio 기본 경로는 `localApi = "openai"`, `localBaseUrl = "http://127.0.0.1:1235/v1"` 이다.
+- 현재 기본 경로는 host `mlx_lm.server` 의 `localApi = "openai"`, `localBaseUrl = "http://127.0.0.1:1235/v1"` 이다.
 - Ollama 대체 프로필을 쓸 때만 `localApi = "ollama"`, `localBaseUrl = "http://127.0.0.1:11435"` 로 바꾼다.
 - 이 저장소는 OpenClaw source repo 가 아니라 플러그인/설정/로컬 infra 저장소다. 실제 실행 binary 는 글로벌 `openclaw` 설치본일 수 있으므로 source 변경과 runtime 반영을 혼동하지 않는다.
 - fallback 세부 정책은 [extensions/smart-router/README.md](../extensions/smart-router/README.md)의 `LLM 분류 운영 프로필 (최종)`을 source of truth로 본다.

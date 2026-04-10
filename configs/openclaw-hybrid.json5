@@ -2,28 +2,29 @@
 // 이 파일을 ~/.openclaw/openclaw.json 에 병합하여 사용
 //
 // 현재 권장 기준:
-//   1. 기본 local 런타임은 LM Studio OpenAI 호환 endpoint 사용
-//   2. 기본 local 모델은 lmstudio-community/LFM2-24B-A2B-MLX-4bit
-//   3. 분류기는 local 우선 + timeout>=3s면 full, JSON/연결/HTTP 실패면 nano
-//   4. 환경변수: export OPENAI_API_KEY=sk-...
+//   1. 기본 local 런타임은 host macOS의 llama.cpp OpenAI 호환 endpoint 사용
+//   2. logical provider ID 는 llama-cpp 를 사용
+//   3. 기본 local 모델은 LiquidAI/LFM2-24B-A2B-GGUF:Q4_0
+//   4. 분류기는 local 우선 + timeout>=3s면 full, JSON/연결/HTTP 실패면 nano
+//   5. 환경변수: export OPENAI_API_KEY=sk-...
 {
   // ── 모델 프로바이더 ──────────────────────────────────────────
-  // smart-router 가 LM Studio OpenAI 호환 API를 local 경로로 사용한다.
+  // smart-router 가 host llama.cpp OpenAI 호환 API를 local 경로로 사용한다.
   "models": {
     "mode": "merge",
     "providers": {
-      "lmstudio": {
-        "baseUrl": "http://127.0.0.1:1235/v1",
-        "apiKey": "lm-studio",
+      "llama-cpp": {
+        "baseUrl": "http://127.0.0.1:1242/v1",
+        "apiKey": "llama-cpp-local",
         "api": "openai-completions",
         "models": [
           {
-            "id": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-            "name": "LFM2 24B A2B MLX 4bit (로컬 기본)",
+            "id": "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+            "name": "LFM2 24B A2B GGUF Q4_0 (로컬 기본)",
             "reasoning": false,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 32768,
+            "contextWindow": 128000,
             "maxTokens": 8192
           }
         ]
@@ -51,7 +52,7 @@
         "smart-router/nano": {},
         "smart-router/mini": {},
         "smart-router/full": {},
-        "lmstudio/lmstudio-community/LFM2-24B-A2B-MLX-4bit": {},
+        "llama-cpp/LiquidAI/LFM2-24B-A2B-GGUF:Q4_0": {},
         "openai/gpt-5.4-mini-2026-03-17": {}
       }
     }
@@ -63,10 +64,10 @@
       "smart-router": {
         "enabled": true,
         "config": {
-          // 로컬 LLM 설정 (LM Studio)
-          "localProvider": "lmstudio",
-          "localModel": "lmstudio-community/LFM2-24B-A2B-MLX-4bit",
-          "localBaseUrl": "http://127.0.0.1:1235/v1",
+          // 로컬 LLM 설정 (llama.cpp)
+          "localProvider": "llama-cpp",
+          "localModel": "LiquidAI/LFM2-24B-A2B-GGUF:Q4_0",
+          "localBaseUrl": "http://127.0.0.1:1242/v1",
           "localApi": "openai",
           // 외부 LLM 설정
           "remoteProvider": "openai",

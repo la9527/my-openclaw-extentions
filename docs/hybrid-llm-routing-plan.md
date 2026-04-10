@@ -1,10 +1,23 @@
 # OpenClaw 하이브리드 LLM 라우팅 구성 작업 방안
 
-> 현재 운영 기준 아님. 이 문서는 초기 구상 기록이며, 현재 실제 운영 기준은 [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md) 와 [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5) 를 따른다.
+> 현재 운영 기준 아님. 이 문서는 초기 구상 기록이다.
+
+> 현재 실제 운영 기준은 host `mlx_lm.server` + `LFM2` + `1235/1236` 구조이며, 요약은 [smart-router-environment-history-2026-04-04.md](smart-router-environment-history-2026-04-04.md), 설정 예시는 [../configs/openclaw-hybrid.json5](../configs/openclaw-hybrid.json5) 를 따른다.
 
 > 작성일: 2026-03-24  
 > 대상 환경: Mac mini M4 (32GB) / macOS / OpenClaw 2026.3.13  
 > 목적: 기본 요청은 로컬 LLM(Ollama)으로 처리하고, 복잡한 요청은 외부 LLM으로 전달하는 하이브리드 구조 구현
+
+## 버전 히스토리
+
+| 구분 | 이전 버전 | 현재 버전 |
+|---|---|---|
+| 문서 성격 | 초기 Ollama 중심 구상 문서 | 2026-04-04 실운영 정리 문서는 별도 유지 |
+| local runtime | Ollama 중심 가정 | host `mlx_lm.server` |
+| local 기본 모델 | `qwen3:8b` 등 초안 | `lmstudio-community/LFM2-24B-A2B-MLX-4bit` |
+| 참고 문서 | 이 문서 자체 | `docs/smart-router-environment-history-2026-04-04.md`, `extensions/smart-router/README.md` |
+
+이 문서 아래 내용은 당시의 설계/비교 기준을 보존하기 위한 기록으로 유지한다.
 
 ---
 

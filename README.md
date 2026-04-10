@@ -6,7 +6,28 @@ OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입
 
 `OpenClaw smart-router plugin and local config samples for complexity-based local/remote LLM routing.`
 
-현재 포함된 핵심 구성은 `smart-router` 플러그인과 로컬 Ollama 운영용 infra 입니다. smart-router는 요청 복잡도에 따라 로컬 LLM과 외부 LLM을 자동으로 선택합니다.
+현재 포함된 핵심 구성은 `smart-router` 플러그인과 로컬 런타임 운영용 설정/문서입니다. smart-router는 요청 복잡도에 따라 로컬 LLM과 외부 LLM을 자동으로 선택합니다.
+
+## 현재 환경
+
+기준 시점: `2026-04-04`
+
+현재 운영 기준은 아래와 같습니다.
+
+| 항목 | 현재 값 |
+|---|---|
+| OpenClaw runtime | 글로벌 설치본 `openclaw 2026.4.2` |
+| local runtime | host macOS `mlx_lm.server` |
+| local endpoint | `http://127.0.0.1:1235/v1` |
+| WebUI filtered endpoint | `http://127.0.0.1:1236/v1` |
+| local 기본 모델 | `lmstudio-community/LFM2-24B-A2B-MLX-4bit` |
+| remote 기본 tier | `mini` |
+
+주의:
+
+1. 현재 `localProvider: "lmstudio"` 는 LM Studio 앱 자체를 뜻하지 않고, `1235` OpenAI-compatible endpoint에 붙는 logical provider ID로 유지한다.
+2. Docker Ollama는 현재 기본 운영안이 아니라 대체/실험 프로필이다.
+3. 이전 환경과 현재 환경 차이는 [docs/smart-router-environment-history-2026-04-04.md](docs/smart-router-environment-history-2026-04-04.md)에 정리했다.
 
 ## 포함 내용
 
@@ -15,7 +36,7 @@ OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입
 - `configs/`
   - 로컬 실행용 설정 예시
 - `infra/docker/`
-  - Ollama Docker Compose 예시
+  - Ollama 대체/실험 Compose 예시
 - `infra/scripts/`
   - 모델 pull, 상태 점검 스크립트
 - `docs/`
@@ -27,7 +48,7 @@ OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입
 
 | 복잡도 점수 | 라우팅 대상 | 기본 모델 |
 |---|---|---|
-| `0~3` | `local` | `gemma3:4b` |
+| `0~3` | `local` | `lmstudio-community/LFM2-24B-A2B-MLX-4bit` |
 | `4~6` | `mini` | `gpt-5.4-mini-2026-03-17` |
 | `7+` | `full` | `gpt-5.4-2026-03-05` |
 
@@ -43,27 +64,27 @@ OpenClaw에서 사용할 커스텀 확장과 설정을 정리하는 저장소입
 
 ## 빠른 시작
 
-1. `infra/docker/docker-compose.yml` 로 Ollama를 실행합니다.
-2. `infra/scripts/pull-ollama-models.sh` 로 `gemma3:4b`, `qwen2.5:14b-instruct` 를 준비합니다.
-3. OpenClaw 설정에 플러그인 경로를 추가하고 `agents.defaults.model.primary`를 `smart-router/auto`로 설정합니다.
-4. `llm` 분류 모드를 사용할 경우 `OPENAI_API_KEY`를 게이트웨이 실행 프로세스 환경에 넣습니다.
+1. host macOS에서 `1235` OpenAI-compatible local endpoint가 떠 있는지 확인합니다.
+2. OpenClaw 설정에 플러그인 경로를 추가하고 `agents.defaults.model.primary`를 `smart-router/auto`로 설정합니다.
+3. `llm` 분류 모드를 사용할 경우 `OPENAI_API_KEY`를 게이트웨이 실행 프로세스 환경에 넣습니다.
+4. Docker Ollama는 필요할 때만 대체/실험 프로필로 사용합니다.
 
 예시 설정은 [configs/openclaw-hybrid.json5](configs/openclaw-hybrid.json5) 에 있습니다.
 
-운영 가이드는 [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md) 를 우선 참고합니다.
+현재 운영/히스토리 요약은 [docs/smart-router-environment-history-2026-04-04.md](docs/smart-router-environment-history-2026-04-04.md) 를 우선 참고합니다.
 
 ## 권장 운영 방식
 
-현재 권장 로컬 런타임은 Docker Ollama 입니다.
+현재 권장 로컬 런타임은 host macOS `mlx_lm.server` 입니다.
 
 ```bash
-cd /Volumes/ExtData/MyOpenClawRepo
-cp infra/docker/.env.example infra/docker/.env
-docker compose --env-file infra/docker/.env -f infra/docker/docker-compose.yml up -d
-bash infra/scripts/pull-ollama-models.sh
+curl -sS http://127.0.0.1:1235/v1/models
+curl -sS http://127.0.0.1:1236/v1/models
 ```
 
-기본 local 모델은 `gemma3:4b` 이고, `qwen2.5:14b-instruct` 는 후보/수동 전환용으로 유지합니다.
+기본 local 모델은 `lmstudio-community/LFM2-24B-A2B-MLX-4bit` 이고, Docker Ollama는 대체/실험 프로필로 유지합니다.
+
+이전 Docker Ollama 기준은 [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md) 에 남겨 둡니다.
 
 ## 설치
 
@@ -89,8 +110,8 @@ OpenClaw 설정 예시:
         "smart-router/nano": {},
         "smart-router/mini": {},
         "smart-router/full": {},
-        "ollama/gemma3:4b": {},
-        "ollama/qwen2.5:14b-instruct": {}
+        "lmstudio/lmstudio-community/LFM2-24B-A2B-MLX-4bit": {},
+        "openai/gpt-5.4-mini-2026-03-17": {}
       }
     }
   },
@@ -117,13 +138,14 @@ pnpm exec vitest run complexity.test.ts index.test.ts
 
 - `smart-router/auto`에서 `mini`, `full` 자동 라우팅
 - `smart-router/local`, `smart-router/nano`, `smart-router/mini`, `smart-router/full` 직접 선택
-- `ollama/gemma3:4b`, `ollama/qwen2.5:14b-instruct` 직접 선택
+- `lmstudio/lmstudio-community/LFM2-24B-A2B-MLX-4bit` 직접 선택
 - `evaluationMode: llm` 사용 시 `OPENAI_API_KEY`가 게이트웨이 프로세스 환경에서 보이는지 확인
 
 ## 문서
 
 - 상세 플러그인 설명: [extensions/smart-router/README.md](extensions/smart-router/README.md)
-- Docker Ollama 운영 가이드: [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md)
+- 현재/이전 환경 히스토리: [docs/smart-router-environment-history-2026-04-04.md](docs/smart-router-environment-history-2026-04-04.md)
+- Docker Ollama 대체 운영 가이드: [docs/ollama-docker-operations.md](docs/ollama-docker-operations.md)
 
 ## AI 작업용 customization
 
