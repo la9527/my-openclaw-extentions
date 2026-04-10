@@ -98,6 +98,21 @@ class TestExportPhotosLocal:
         assert len(result["failed"]) == 0
         assert (output_dir / "photo_0.jpg").exists()
 
+    def test_export_accepts_basename(self, tmp_photo_dir: Path, tmp_path: Path):
+        from server import export_photos
+
+        output_dir = tmp_path / "exported-basename"
+        result = export_photos(
+            source="local",
+            photo_ids=["photo_1.jpg"],
+            output_dir=str(output_dir),
+            path_or_bucket=str(tmp_photo_dir),
+        )
+
+        assert result["exported"] == ["photo_1.jpg"]
+        assert result["failed"] == []
+        assert (output_dir / "photo_1.jpg").exists()
+
     def test_export_nonexistent_fails(self, tmp_path: Path):
         from server import export_photos
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +14,7 @@ except ImportError:
     pass  # HEIC support unavailable
 
 from models import Photo, PhotoMetadata
+from sources.image_utils import open_image_path, thumbnail_to_base64
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +76,8 @@ class LocalFolderSource:
 
     def get_metadata(self, photo_id: str) -> PhotoMetadata | None:
         """Get EXIF metadata from a local image file."""
-        path = Path(photo_id)
-        if not path.exists():
+        path = self.resolve_photo_path(photo_id)
+        if path is None:
             return None
 
         from PIL import Image
@@ -94,7 +93,7 @@ class LocalFolderSource:
 
         stat = path.stat()
         return PhotoMetadata(
-            photo_id=photo_id,
+            photo_id=str(path),
             filename=path.name,
             date_taken=datetime.fromtimestamp(stat.st_mtime).isoformat(),
             camera_make=exif_dict.get("Make", ""),
@@ -105,14 +104,29 @@ class LocalFolderSource:
         self, photo_id: str, max_size: int = 512
     ) -> str | None:
         """Get resized thumbnail as base64."""
-        from PIL import Image
-
-        path = Path(photo_id)
-        if not path.exists():
+        path = self.resolve_photo_path(photo_id)
+        if path is None:
             return None
 
-        image = Image.open(path)
-        image.thumbnail((max_size, max_size))
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
+        image = open_image_path(path)
+        return thumbnail_to_base64(image, max_size)
+
+    def resolve_photo_path(self, photo_id: str) -> Path | None:
+        """Resolve an incoming local photo ID to an existing file path."""
+        path = self._resolve_photo_path(photo_id)
+        return path if path.exists() else None
+
+    def _resolve_photo_path(self, photo_id: str) -> Path:
+        candidate = Path(photo_id)
+        if candidate.exists():
+            return candidate
+
+        rooted = self._root / photo_id
+        if rooted.exists():
+            return rooted
+
+        basename_matches = list(self._root.rglob(Path(photo_id).name))
+        if len(basename_matches) == 1:
+            return basename_matches[0]
+
+        return candidate

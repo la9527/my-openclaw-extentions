@@ -298,3 +298,26 @@ class TestApplePhotosSource:
             call(download_missing=True),
             call(download_missing=True, use_photokit=True),
         ]
+
+    def test_get_thumbnail_uses_terminal_helper_when_enabled(self, mock_osxphotos, tmp_path):
+        downloaded = tmp_path / "downloaded.jpg"
+        Image.new("RGB", (320, 240), color=(10, 20, 30)).save(
+            downloaded,
+            format="JPEG",
+        )
+
+        mock_osxphotos.photos.return_value = [
+            _make_mock_photo(uuid="u1", filename="IMG.jpg", path=None)
+        ]
+
+        from sources.apple_photos import ApplePhotosSource
+
+        src = ApplePhotosSource()
+        src._fetch_mode = "terminal"
+        src._run_terminal_helper = MagicMock(return_value=str(downloaded))
+
+        thumb = src.get_thumbnail("u1", max_size=64)
+
+        assert thumb is not None
+        src._run_terminal_helper.assert_called_once_with("u1")
+        mock_osxphotos.exporter_cls.assert_not_called()

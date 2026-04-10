@@ -285,6 +285,31 @@ class TestLoadApple(unittest.TestCase):
 
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_missing_photo_uses_terminal_helper_when_enabled(self):
+        import importlib
+
+        tmpdir = tempfile.mkdtemp()
+        downloaded = Path(tmpdir) / "icloud.jpg"
+        downloaded.write_bytes(_make_test_image())
+
+        no_path = self._make_mock_photo("u1", "a.jpg", None)
+        no_path.path = None
+
+        with self._patch_osxphotos([no_path]):
+            import sources
+            importlib.reload(sources)
+            sources._APPLE_FETCH_MODE = "terminal"
+            sources._run_terminal_fetch_helper = MagicMock(return_value=str(downloaded))
+            photos = sources.load_photos("apple", "", limit=10)
+
+        assert len(photos) == 1
+        assert photos[0]["source_photo_path"] == str(downloaded)
+        sources._run_terminal_fetch_helper.assert_called_once_with("u1")
+
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class TestLoadUnsupported(unittest.TestCase):
     """Test error handling for unsupported sources."""

@@ -257,6 +257,7 @@ start_classify_job(
 - 이 동작은 첫 접근 시 느릴 수 있으며, 인터넷 연결과 Photos 접근 권한이 필요하다.
 - 확보된 임시 파일 경로는 해당 작업의 `source_photo_path`로 저장되어 review/export 후속 흐름에서도 재사용된다.
 - VS Code 통합 터미널에서 Photos 권한이 붙지 않는 경우가 있어, 실 iCloud fetch 검증은 `Terminal.app` 에서 `./scripts/validate_icloud_fetch_terminal.sh [UUID]` 로 실행하는 편이 안정적이다.
+- ZeroClaw나 launchd에서 `photo-ranker`를 붙일 때 Apple Photos 앨범 쓰기 권한이 안 붙으면 `PHOTO_RANKER_APPLE_EVENTS_MODE=terminal` 로 Terminal helper 경로를 켜는 편이 안정적이다. 이 모드에서는 album/list/create/add/import 계열 작업을 Terminal.app 안의 별도 Python helper로 실행한다.
 - 현재 터미널 세션에서 바로 보고 싶으면 `uv run --directory . python ./scripts/validate_icloud_fetch.py [UUID]` 를 사용할 수 있다.
 
 ## 테스트

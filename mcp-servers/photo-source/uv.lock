@@ -51,6 +51,11 @@ wheels = [
 ]
 
 [[package]]
+name = "apple-terminal-helper"
+version = "0.1.0"
+source = { directory = "../apple-terminal-helper" }
+
+[[package]]
 name = "arpeggio"
 version = "2.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1041,6 +1046,7 @@ name = "photo-source"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "apple-terminal-helper" },
     { name = "mcp" },
     { name = "pillow" },
     { name = "pillow-heif" },
@@ -1086,6 +1092,7 @@ google = [
 
 [package.metadata]
 requires-dist = [
+    { name = "apple-terminal-helper", directory = "../apple-terminal-helper" },
     { name = "google-api-python-client", marker = "extra == 'google'", specifier = ">=2.100" },
     { name = "google-auth-httplib2", marker = "extra == 'google'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google'", specifier = ">=1.2" },

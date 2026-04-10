@@ -210,8 +210,8 @@ def export_photos(
                 if source == "local":
                     import shutil
 
-                    src_path = Path(pid)
-                    if src_path.exists():
+                    src_path = src.resolve_photo_path(pid)
+                    if src_path is not None:
                         shutil.copy2(src_path, out / src_path.name)
                     else:
                         failed.append(pid)
@@ -252,3 +252,7 @@ def _resolve_source(source: str, path_or_bucket: str):
         return _get_google_photos_source()
     else:
         raise ValueError(f"Unknown source: {source}. Use 'local', 'apple', 'google', or 'gcs'.")
+
+
+if __name__ == "__main__":
+    mcp.run()

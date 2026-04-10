@@ -202,7 +202,7 @@ class GooglePhotosSource:
 
         try:
             import requests
-            from PIL import Image
+            from sources.image_utils import open_image_bytes, thumbnail_to_base64
 
             item = self._service.mediaItems().get(mediaItemId=photo_id).execute()
             base_url = item.get("baseUrl")
@@ -214,10 +214,8 @@ class GooglePhotosSource:
             resp = requests.get(url, timeout=30)
             resp.raise_for_status()
 
-            image = Image.open(io.BytesIO(resp.content))
-            buf = io.BytesIO()
-            image.save(buf, format="JPEG", quality=85)
-            return base64.b64encode(buf.getvalue()).decode()
+            image = open_image_bytes(resp.content)
+            return thumbnail_to_base64(image, max_size)
         except Exception as e:
             logger.error("Failed to get thumbnail for %s: %s", photo_id, e)
             return None

@@ -8,7 +8,11 @@ Provides two core operations:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+import sys
+
+from apple_terminal_helper import run_in_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +22,29 @@ class AlbumWriter:
 
     def __init__(self) -> None:
         self._lib = None
+        self._apple_events_mode = os.getenv("PHOTO_RANKER_APPLE_EVENTS_MODE", "direct")
+        self._app_dir = Path(__file__).resolve().parent
+        self._terminal_python = os.getenv(
+            "PHOTO_RANKER_TERMINAL_PYTHON_BIN",
+            str(self._app_dir / ".venv/bin/python"),
+        )
+        self._terminal_timeout_secs = float(
+            os.getenv("PHOTO_RANKER_TERMINAL_TIMEOUT_SECS", "90")
+        )
+
+    def _should_use_terminal_helper(self) -> bool:
+        return sys.platform == "darwin" and self._apple_events_mode == "terminal"
+
+    def _run_terminal_helper(self, operation: str, payload: dict) -> dict | list:
+        return run_in_terminal(
+            python_bin=self._terminal_python,
+            helper_script=self._app_dir / "scripts" / "apple_photos_terminal_runner.py",
+            app_dir=self._app_dir,
+            request={"operation": operation, "payload": payload},
+            timeout_secs=self._terminal_timeout_secs,
+            env_overrides={"PHOTO_RANKER_APPLE_EVENTS_MODE": "direct"},
+            tmp_prefix="photo-ranker-terminal-",
+        )
 
     def _ensure_lib(self):
         if self._lib is not None:
@@ -46,6 +73,10 @@ class AlbumWriter:
         Returns:
             {"album": name, "uuid": str, "folder": folder}
         """
+        if self._should_use_terminal_helper():
+            result = self._run_terminal_helper("create_album", {"name": name, "folder": folder})
+            return dict(result)
+
         self._ensure_lib()
         import photoscript
 
@@ -75,6 +106,10 @@ class AlbumWriter:
 
     def list_albums(self) -> list[dict]:
         """List all albums in Photos."""
+        if self._should_use_terminal_helper():
+            result = self._run_terminal_helper("list_albums", {})
+            return list(result)
+
         self._ensure_lib()
 
         return [
@@ -84,6 +119,10 @@ class AlbumWriter:
 
     def delete_album(self, name: str) -> bool:
         """Delete an album (photos are not deleted)."""
+        if self._should_use_terminal_helper():
+            result = self._run_terminal_helper("delete_album", {"name": name})
+            return bool(result["deleted"])
+
         self._ensure_lib()
 
         album = self._lib.album(name)
@@ -114,6 +153,17 @@ class AlbumWriter:
         Returns:
             {"album": str, "added": int, "failed": int, "errors": list}
         """
+        if self._should_use_terminal_helper():
+            result = self._run_terminal_helper(
+                "add_photos_to_album",
+                {
+                    "photo_uuids": photo_uuids,
+                    "album_name": album_name,
+                    "folder": folder,
+                },
+            )
+            return dict(result)
+
         self._ensure_lib()
         import photoscript
 
@@ -246,6 +296,18 @@ class AlbumWriter:
         Returns:
             {"imported": int, "album": str, "errors": list}
         """
+        if self._should_use_terminal_helper():
+            result = self._run_terminal_helper(
+                "import_photos",
+                {
+                    "photo_paths": photo_paths,
+                    "album_name": album_name,
+                    "folder": folder,
+                    "skip_duplicates": skip_duplicates,
+                },
+            )
+            return dict(result)
+
         self._ensure_lib()
 
         # Validate paths

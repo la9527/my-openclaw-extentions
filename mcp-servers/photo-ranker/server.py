@@ -75,6 +75,22 @@ def get_dedup() -> DedupEngine:
     return _dedup
 
 
+def _format_album_writer_error(operation: str, exc: Exception) -> str:
+    message = str(exc)
+    payload: dict[str, object] = {
+        "error": f"Apple Photos {operation} failed",
+        "details": message,
+        "operation": operation,
+    }
+    if "-1743" in message or "Apple 이벤트" in message:
+        payload["code"] = "apple_events_permission_denied"
+        payload["hint"] = (
+            "Terminal.app 에서 직접 실행하고, macOS 설정 > 개인정보 보호 및 보안 > 자동화에서 "
+            "Terminal 이 Photos 를 제어하도록 허용했는지 확인하세요."
+        )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 @mcp.tool()
 async def score_quality(image_b64: str, photo_id: str = "") -> str:
     """Score the aesthetic and technical quality of a photo.
@@ -809,7 +825,11 @@ async def create_album(name: str, folder: str = "") -> str:
         JSON with album name, uuid, created status.
     """
     writer = _get_album_writer()
-    result = writer.create_album(name, folder)
+    try:
+        result = writer.create_album(name, folder)
+    except Exception as exc:
+        logger.exception("create_album failed")
+        return _format_album_writer_error("create_album", exc)
     return json.dumps(result)
 
 
@@ -831,7 +851,11 @@ async def add_to_album(
     """
     writer = _get_album_writer()
     uuids = json.loads(photo_uuids_json)
-    result = writer.add_photos_to_album(uuids, album_name, folder)
+    try:
+        result = writer.add_photos_to_album(uuids, album_name, folder)
+    except Exception as exc:
+        logger.exception("add_to_album failed")
+        return _format_album_writer_error("add_to_album", exc)
     return json.dumps(result)
 
 
@@ -861,9 +885,13 @@ async def organize_results(
         return json.dumps({"error": f"No results for job {job_id}"})
 
     writer = _get_album_writer()
-    result = writer.organize_by_classification(
-        results, album_prefix, folder, min_score, group_by_date=group_by_date,
-    )
+    try:
+        result = writer.organize_by_classification(
+            results, album_prefix, folder, min_score, group_by_date=group_by_date,
+        )
+    except Exception as exc:
+        logger.exception("organize_results failed")
+        return _format_album_writer_error("organize_results", exc)
     return json.dumps(result)
 
 
@@ -1077,11 +1105,15 @@ async def curate_best_photos(
 
     album_result: dict[str, object] | None = None
     if normalized_mode == "album" and selected_photo_ids:
-        album_result = _get_album_writer().add_photos_to_album(
-            sorted(selected_photo_ids),
-            target_album_name,
-            folder,
-        )
+        try:
+            album_result = _get_album_writer().add_photos_to_album(
+                sorted(selected_photo_ids),
+                target_album_name,
+                folder,
+            )
+        except Exception as exc:
+            logger.exception("curate_best_photos album write-back failed")
+            return _format_album_writer_error("curate_best_photos", exc)
 
     summary = {
         "job_id": job.id,
@@ -1176,7 +1208,11 @@ async def import_photos(
     """
     writer = _get_album_writer()
     paths = json.loads(photo_paths_json)
-    result = writer.import_photos(paths, album_name, folder, skip_duplicates)
+    try:
+        result = writer.import_photos(paths, album_name, folder, skip_duplicates)
+    except Exception as exc:
+        logger.exception("import_photos failed")
+        return _format_album_writer_error("import_photos", exc)
     return json.dumps(result)
 
 
@@ -1201,7 +1237,11 @@ async def import_and_organize(
     writer = _get_album_writer()
     paths = json.loads(photo_paths_json)
     results = json.loads(results_json)
-    result = writer.import_and_classify(paths, results, album_prefix, folder)
+    try:
+        result = writer.import_and_classify(paths, results, album_prefix, folder)
+    except Exception as exc:
+        logger.exception("import_and_organize failed")
+        return _format_album_writer_error("import_and_organize", exc)
     return json.dumps(result)
 
 
@@ -1213,7 +1253,11 @@ async def list_photo_albums() -> str:
         JSON array of {name, uuid, count}.
     """
     writer = _get_album_writer()
-    albums = writer.list_albums()
+    try:
+        albums = writer.list_albums()
+    except Exception as exc:
+        logger.exception("list_photo_albums failed")
+        return _format_album_writer_error("list_photo_albums", exc)
     return json.dumps(albums)
 
 

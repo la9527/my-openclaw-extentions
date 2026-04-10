@@ -124,6 +124,27 @@ class TestToolRegistration:
         assert callable(getattr(server, "export_selected_photos", None))
 
 
+class TestAlbumToolErrors:
+    @pytest.mark.asyncio
+    async def test_list_photo_albums_surfaces_permission_error(self):
+        import server
+        from unittest.mock import MagicMock, patch
+
+        mock_writer = MagicMock()
+        mock_writer.list_albums.side_effect = Exception(
+            "Photos에 Apple 이벤트를 보낼 권한이 없습니다. (-1743)"
+        )
+
+        with patch.object(server, "_get_album_writer", return_value=mock_writer):
+            result = await server.list_photo_albums()
+
+        parsed = json.loads(result)
+        assert parsed["error"] == "Apple Photos list_photo_albums failed"
+        assert parsed["code"] == "apple_events_permission_denied"
+        assert "-1743" in parsed["details"]
+        assert "Terminal.app" in parsed["hint"]
+
+
 class TestRegisterFaceFromJob:
     """Test register_face_from_job MCP tool logic."""
 

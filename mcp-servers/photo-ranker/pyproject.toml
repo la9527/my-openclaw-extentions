@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Photo ranking and classification MCP server for OpenClaw"
 requires-python = ">=3.12"
 dependencies = [
+    "apple-terminal-helper",
     "mcp>=1.0.0",
     "pillow>=10.0",
     "pillow-heif>=0.16",
@@ -11,6 +12,9 @@ dependencies = [
     "pydantic>=2.0",
     "imagehash>=4.3",
 ]
+
+[tool.uv.sources]
+apple-terminal-helper = { path = "../apple-terminal-helper" }
 
 [project.optional-dependencies]
 vlm = ["mlx-vlm>=0.1"]

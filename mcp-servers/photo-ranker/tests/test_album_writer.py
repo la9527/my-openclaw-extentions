@@ -136,6 +136,37 @@ class TestDeleteAlbum(_AlbumWriterTestBase):
         self.mock_lib.delete_album.assert_not_called()
 
 
+class TestTerminalAppleEventsMode(_AlbumWriterTestBase):
+    def test_list_albums_uses_terminal_helper(self):
+        self.writer._apple_events_mode = "terminal"
+        self.writer._run_terminal_helper = MagicMock(return_value=[{"name": "Travel", "uuid": "u1", "count": 3}])
+
+        result = self.writer.list_albums()
+
+        assert result == [{"name": "Travel", "uuid": "u1", "count": 3}]
+        self.writer._run_terminal_helper.assert_called_once_with("list_albums", {})
+        self.mock_lib.albums.assert_not_called()
+
+    def test_add_photos_to_album_uses_terminal_helper(self):
+        self.writer._apple_events_mode = "terminal"
+        self.writer._run_terminal_helper = MagicMock(
+            return_value={"album": "Events", "added": 2, "failed": 0, "errors": []}
+        )
+
+        result = self.writer.add_photos_to_album(["uuid-1", "uuid-2"], "Events", "AI 분류")
+
+        assert result["added"] == 2
+        self.writer._run_terminal_helper.assert_called_once_with(
+            "add_photos_to_album",
+            {
+                "photo_uuids": ["uuid-1", "uuid-2"],
+                "album_name": "Events",
+                "folder": "AI 분류",
+            },
+        )
+        self.mock_lib.album.assert_not_called()
+
+
 # ── Organize Existing Photos Tests ─────────────────────
 
 

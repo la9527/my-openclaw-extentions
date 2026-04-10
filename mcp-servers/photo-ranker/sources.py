@@ -9,8 +9,12 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
+import sys
 import tempfile
 from pathlib import Path
+
+from apple_terminal_helper import run_in_terminal
 
 try:
     from pillow_heif import register_heif_opener
@@ -25,6 +29,13 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
 _APPLE_DOWNLOAD_CACHE_DIR: Path | None = None
 _APPLE_DOWNLOADED_PATHS: dict[str, str] = {}
 _APPLE_PHOTOKIT_DISABLED = False
+_APPLE_FETCH_MODE = os.getenv("PHOTO_RANKER_APPLE_FETCH_MODE", "direct")
+_APP_DIR = Path(__file__).resolve().parent
+_TERMINAL_PYTHON = os.getenv(
+    "PHOTO_RANKER_TERMINAL_PYTHON_BIN",
+    str(_APP_DIR / ".venv/bin/python"),
+)
+_TERMINAL_TIMEOUT_SECS = float(os.getenv("PHOTO_RANKER_TERMINAL_TIMEOUT_SECS", "90"))
 
 
 def load_photos(
@@ -255,6 +266,23 @@ def _apple_export_strategies() -> list[tuple[str, dict[str, bool]]]:
     return strategies
 
 
+def _should_use_terminal_helper() -> bool:
+    return sys.platform == "darwin" and _APPLE_FETCH_MODE == "terminal"
+
+
+def _run_terminal_fetch_helper(photo_id: str) -> str | None:
+    response = run_in_terminal(
+        python_bin=_TERMINAL_PYTHON,
+        helper_script=_APP_DIR / "scripts" / "apple_photos_terminal_fetch.py",
+        app_dir=_APP_DIR,
+        request={"photo_id": photo_id},
+        timeout_secs=_TERMINAL_TIMEOUT_SECS,
+        env_overrides={"PHOTO_RANKER_APPLE_FETCH_MODE": "direct"},
+        tmp_prefix="photo-ranker-terminal-",
+    )
+    return response.get("path") or None  # type: ignore[union-attr]
+
+
 def _is_photokit_auth_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "auth_status" in message or "authorization" in message
@@ -267,6 +295,25 @@ def _download_missing_apple_photo(photo) -> str | None:
         import osxphotos
     except ImportError:
         return None
+
+    if _should_use_terminal_helper():
+        try:
+            fetched_path = _run_terminal_fetch_helper(photo.uuid)
+        except Exception as exc:
+            logger.warning(
+                "Terminal helper failed to fetch Apple photo from iCloud: %s (%s)",
+                photo.uuid,
+                exc,
+            )
+        else:
+            if fetched_path:
+                _APPLE_DOWNLOADED_PATHS[photo.uuid] = fetched_path
+                logger.info(
+                    "Downloaded Apple photo %s via Terminal helper to %s",
+                    photo.uuid,
+                    fetched_path,
+                )
+                return fetched_path
 
     cache_dir = _get_apple_cache_dir() / photo.uuid
     cache_dir.mkdir(parents=True, exist_ok=True)

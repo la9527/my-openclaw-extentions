@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "Photo source access MCP server for OpenClaw (Apple Photos, GCS, local)"
 requires-python = ">=3.12"
 dependencies = [
+    "apple-terminal-helper",
     "mcp>=1.0.0",
     "pillow>=10.0",
     "pillow-heif>=0.16",
     "pydantic>=2.0",
 ]
+
+[tool.uv.sources]
+apple-terminal-helper = { path = "../apple-terminal-helper" }
 
 [project.optional-dependencies]
 apple = [

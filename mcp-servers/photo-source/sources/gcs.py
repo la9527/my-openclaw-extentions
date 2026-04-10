@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import logging
 import posixpath
 from datetime import datetime
 
 from models import Photo, PhotoMetadata
+from sources.image_utils import open_image_bytes, thumbnail_to_base64
 
 logger = logging.getLogger(__name__)
 
@@ -104,19 +103,14 @@ class GCSSource:
     ) -> str | None:
         """Download and resize image from GCS to base64 thumbnail."""
         self._ensure_loaded()
-        from PIL import Image
 
         blob = self._bucket.blob(photo_id)
         if not blob.exists():
             return None
 
         data = blob.download_as_bytes()
-        image = Image.open(io.BytesIO(data))
-        image.thumbnail((max_size, max_size))
-
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
+        image = open_image_bytes(data)
+        return thumbnail_to_base64(image, max_size)
 
     def _extract_exif(self, image_data: bytes) -> dict:
         """Extract EXIF data from image bytes."""

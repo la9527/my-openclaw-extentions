@@ -62,6 +62,25 @@ class TestLocalFolderSource:
         thumb = src.get_thumbnail("/nonexistent/photo.jpg")
         assert thumb is None
 
+    def test_get_thumbnail_supports_palette_png(self, tmp_path: Path):
+        src = LocalFolderSource(str(tmp_path))
+        image = Image.new("P", (32, 32))
+        palette_path = tmp_path / "palette.png"
+        image.save(palette_path, format="PNG")
+
+        thumb = src.get_thumbnail(str(palette_path), max_size=32)
+
+        assert thumb is not None
+        assert len(thumb) > 0
+
+    def test_get_thumbnail_accepts_basename(self, sample_photo_path: Path):
+        src = LocalFolderSource(str(sample_photo_path.parent))
+
+        thumb = src.get_thumbnail(sample_photo_path.name, max_size=64)
+
+        assert thumb is not None
+        assert len(thumb) > 0
+
     def test_image_extensions_constant(self):
         assert ".jpg" in IMAGE_EXTENSIONS
         assert ".heic" in IMAGE_EXTENSIONS

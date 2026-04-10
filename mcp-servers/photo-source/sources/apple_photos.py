@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import base64
-import io
 import logging
+import os
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from models import Photo, PhotoMetadata
+from sources.image_utils import open_image_path, thumbnail_to_base64
+from apple_terminal_helper import run_in_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,15 @@ class ApplePhotosSource:
         self._cache_dir: Path | None = None
         self._downloaded_paths: dict[str, str] = {}
         self._photokit_disabled = False
+        self._fetch_mode = os.getenv("PHOTO_SOURCE_APPLE_FETCH_MODE", "direct")
+        self._app_dir = Path(__file__).resolve().parent.parent
+        self._terminal_python = os.getenv(
+            "PHOTO_SOURCE_TERMINAL_PYTHON_BIN",
+            str(self._app_dir / ".venv/bin/python"),
+        )
+        self._terminal_timeout_secs = float(
+            os.getenv("PHOTO_SOURCE_TERMINAL_TIMEOUT_SECS", "90")
+        )
 
     def _ensure_loaded(self):
         if self._db is not None:
@@ -113,7 +125,6 @@ class ApplePhotosSource:
     ) -> str | None:
         """Get resized thumbnail as base64."""
         self._ensure_loaded()
-        from PIL import Image
 
         p = self._find_photo(photo_id)
         if p is None:
@@ -122,11 +133,8 @@ class ApplePhotosSource:
         if not path:
             return None
 
-        image = Image.open(path)
-        image.thumbnail((max_size, max_size))
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
+        image = open_image_path(path)
+        return thumbnail_to_base64(image, max_size)
 
     def search_photos(self, query: str, limit: int = 50) -> list[Photo]:
         """Search photos by keyword matching on filename, albums, persons, keywords."""
@@ -198,6 +206,21 @@ class ApplePhotosSource:
             )
         return strategies
 
+    def _should_use_terminal_helper(self) -> bool:
+        return sys.platform == "darwin" and self._fetch_mode == "terminal"
+
+    def _run_terminal_helper(self, photo_id: str) -> str | None:
+        response = run_in_terminal(
+            python_bin=self._terminal_python,
+            helper_script=self._app_dir / "scripts" / "apple_photos_terminal_fetch.py",
+            app_dir=self._app_dir,
+            request={"photo_id": photo_id},
+            timeout_secs=self._terminal_timeout_secs,
+            env_overrides={"PHOTO_SOURCE_APPLE_FETCH_MODE": "direct"},
+            tmp_prefix="photo-source-terminal-",
+        )
+        return response.get("path") or None  # type: ignore[union-attr]
+
     @staticmethod
     def _is_photokit_auth_error(exc: Exception) -> bool:
         message = str(exc).lower()
@@ -208,6 +231,25 @@ class ApplePhotosSource:
             import osxphotos
         except ImportError:
             return None
+
+        if self._should_use_terminal_helper():
+            try:
+                fetched_path = self._run_terminal_helper(photo.uuid)
+            except Exception as exc:
+                logger.warning(
+                    "Terminal helper failed to fetch Apple photo from iCloud: %s (%s)",
+                    photo.uuid,
+                    exc,
+                )
+            else:
+                if fetched_path:
+                    self._downloaded_paths[photo.uuid] = fetched_path
+                    logger.info(
+                        "Downloaded Apple photo %s via Terminal helper to %s",
+                        photo.uuid,
+                        fetched_path,
+                    )
+                    return fetched_path
 
         cache_dir = self._get_cache_dir() / photo.uuid
         cache_dir.mkdir(parents=True, exist_ok=True)
